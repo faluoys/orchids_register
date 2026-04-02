@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Rust
+/target/
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local envs
+.conda/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Serena
+/.serena/
+
+# ProxyPin
+*.har
+
+# Runtime outputs
+register_result.json
+config/runtime.local.yaml
+mail-gateway/data/
+mail-gateway/tests/.tmp*
+
+/.magi
+/.claude
+/orchids_login1.py
+/orchids_register1.py
+/zhuabao

@@ -1,0 +1,29 @@
+conda_env: orchids-register
+
+mail_gateway:
+  host: 127.0.0.1
+  port: 8081
+  database_path: mail-gateway/data/mail_gateway.db
+  luckmail_base_url: https://mails.luckyous.com
+  luckmail_api_key: REPLACE_WITH_REAL_LUCKMAIL_KEY
+
+turnstile_solver:
+  host: 127.0.0.1
+  port: 5000
+  thread: 2
+  browser_type: chromium
+  headless: true
+  debug: false
+  proxy: false
+  random: false
+
+orchids:
+  mail_mode: gateway
+  mail_gateway_base_url: http://127.0.0.1:8081
+  mail_provider: luckmail
+  mail_provider_mode: purchased
+  mail_project_code: orchids
+  poll_timeout: 180
+  poll_interval: 2
+  captcha_api_url: http://127.0.0.1:5000
+  result_json: register_result.json
