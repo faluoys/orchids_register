@@ -27,11 +27,11 @@
 
 主配置文件：
 
-- [runtime.local.yaml](/D:/workspace/github/Orchids_register_TurnstileSolver/orchids_register/config/runtime.local.yaml)
+- [runtime.local.yaml](../config/runtime.local.yaml)
 
 模板文件：
 
-- [runtime.example.yaml](/D:/workspace/github/Orchids_register_TurnstileSolver/orchids_register/config/runtime.example.yaml)
+- [runtime.example.yaml](../config/runtime.example.yaml)
 
 脚本读取顺序：
 
@@ -59,7 +59,7 @@
 如果你想显式初始化：
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 .\scripts\init-runtime-config.ps1
 ```
 
@@ -71,7 +71,7 @@ cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
 
 ### 2.2 你必须先改的字段
 
-先打开 [runtime.local.yaml](/D:/workspace/github/Orchids_register_TurnstileSolver/orchids_register/config/runtime.local.yaml)，至少确认这些值：
+先打开 [runtime.local.yaml](../config/runtime.local.yaml)，至少确认这些值：
 
 ```yaml
 conda_env: orchids-register
@@ -136,7 +136,7 @@ orchids:
 
 ```powershell
 conda activate orchids-register
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 python -m pip install -r .\mail-gateway\requirements.txt
 python -m pip install -r .\TurnstileSolver\requirements.txt
 cd .\ui
@@ -148,7 +148,7 @@ npm install
 ### 4.1 一键初始化本地配置
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 .\scripts\init-runtime-config.ps1
 ```
 
@@ -157,14 +157,14 @@ cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
 PowerShell：
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 .\scripts\start-dev-stack.ps1
 ```
 
 BAT：
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 .\scripts\start-dev-stack.bat
 ```
 
@@ -179,14 +179,14 @@ cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
 PowerShell：
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 .\scripts\build-desktop.ps1
 ```
 
 BAT：
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 .\scripts\build-desktop.bat
 ```
 
@@ -195,21 +195,21 @@ cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
 PowerShell：
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 .\scripts\run-cli-registration.ps1
 ```
 
 BAT：
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 .\scripts\run-cli-registration.bat
 ```
 
 结果文件默认输出到：
 
 ```powershell
-D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register\register_result.json
+.\register_result.json
 ```
 
 ## 5. 单独启动某个部分
@@ -217,28 +217,28 @@ D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register\register_r
 ### 5.1 单独初始化配置
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 .\scripts\init-runtime-config.ps1
 ```
 
 ### 5.2 单独启动 mail-gateway
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 .\scripts\start-mail-gateway.ps1
 ```
 
 ### 5.3 单独启动 TurnstileSolver
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 .\scripts\start-turnstile-solver.ps1
 ```
 
 ### 5.4 单独启动桌面开发模式
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 .\scripts\start-desktop-dev.ps1
 ```
 
@@ -249,7 +249,7 @@ cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
 例如：
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 .\scripts\init-runtime-config.ps1 -DryRun
 .\scripts\start-mail-gateway.ps1 -DryRun
 .\scripts\start-turnstile-solver.ps1 -DryRun
@@ -269,7 +269,8 @@ cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
 
 ```powershell
 conda activate orchids-register
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register\mail-gateway
+cd orchids_register
+cd .\mail-gateway
 python -m uvicorn mail_gateway.app:app --host 127.0.0.1 --port 8081
 ```
 
@@ -277,21 +278,24 @@ python -m uvicorn mail_gateway.app:app --host 127.0.0.1 --port 8081
 
 ```powershell
 conda activate orchids-register
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register\TurnstileSolver
+cd orchids_register
+cd .\TurnstileSolver
 python api_solver.py --host 127.0.0.1 --port 5000 --thread 2 --browser_type chromium
 ```
 
 ### 7.3 桌面开发模式
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register\src-tauri
+cd orchids_register
+cd .\src-tauri
 cargo tauri dev
 ```
 
 ### 7.4 正式打包
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register\src-tauri
+cd orchids_register
+cd .\src-tauri
 cargo tauri build
 ```
 
@@ -300,19 +304,19 @@ cargo tauri build
 桌面打包产物通常在：
 
 ```powershell
-D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register\target\release\bundle
+.\target\release\bundle
 ```
 
 CLI 验证结果默认在：
 
 ```powershell
-D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register\register_result.json
+.\register_result.json
 ```
 
 mail-gateway 数据库默认在：
 
 ```powershell
-D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register\mail-gateway\data\mail_gateway.db
+.\mail-gateway\data\mail_gateway.db
 ```
 
 ## 9. 排查顺序
@@ -321,7 +325,7 @@ D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register\mail-gatew
 
 ### 9.1 先看配置文件
 
-确认 [runtime.local.yaml](/D:/workspace/github/Orchids_register_TurnstileSolver/orchids_register/config/runtime.local.yaml) 里至少这几个值没写错：
+确认 [runtime.local.yaml](../config/runtime.local.yaml) 里至少这几个值没写错：
 
 - `conda_env`
 - `mail_gateway.host`
@@ -370,7 +374,7 @@ D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register\mail-gatew
 
 ### 10.2 `luckmail` 不是 `enabled`
 
-大概率是 [runtime.local.yaml](/D:/workspace/github/Orchids_register_TurnstileSolver/orchids_register/config/runtime.local.yaml) 里的 `luckmail_api_key` 还没换成真实值。
+大概率是 [runtime.local.yaml](../config/runtime.local.yaml) 里的 `luckmail_api_key` 还没换成真实值。
 
 ### 10.3 一键脚本打开了窗口，但服务没起来
 
@@ -381,12 +385,13 @@ D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register\mail-gatew
 先拆开执行：
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register\ui
+cd orchids_register
+cd .\ui
 npm run build
 ```
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 cargo check -p orchids-auto-register-portable
 ```
 
@@ -398,3 +403,4 @@ cargo check -p orchids-auto-register-portable
 - `scripts\start-dev-stack.bat`
 - `scripts\build-desktop.bat`
 - `scripts\run-cli-registration.bat`
+

@@ -2,7 +2,7 @@
 
 更新时间：2026-04-02
 
-本文档用于把当前目录 [orchids_register](/D:/workspace/github/Orchids_register_TurnstileSolver/orchids_register) 初始化为一个新的 Git 仓库，并推送到 GitHub。
+本文档用于把当前目录 `orchids_register` 初始化为一个新的 Git 仓库，并推送到 GitHub。
 
 ## 1. 提交前先确认什么不会被上传
 
@@ -10,7 +10,7 @@
 
 - `config/runtime.local.yaml`
 
-它已经在 [.gitignore](/D:/workspace/github/Orchids_register_TurnstileSolver/orchids_register/.gitignore) 里，正常情况下不会被提交。
+它已经在 [`.gitignore`](../.gitignore) 里，正常情况下不会被提交。
 
 公开仓库里会保留这些文件：
 
@@ -24,7 +24,7 @@
 在项目根目录执行：
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 git init
 git branch -M main
 ```
@@ -126,7 +126,7 @@ git remote set-url origin https://github.com/<你的用户名>/<你的仓库名>
 如果你现在就要直接推，按这个顺序执行：
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 git init
 git branch -M main
 git status --short --ignored
@@ -160,3 +160,4 @@ git status --short --ignored
 - 把共享模板写在 `config/runtime.example.yaml`
 - 提交前先看一次 `git status --short --ignored`
 - 永远不要用 `git add -f config/runtime.local.yaml`
+

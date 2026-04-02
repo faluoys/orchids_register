@@ -64,7 +64,7 @@ orchids_register/
 
 ```powershell
 conda activate orchids-register
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 python -m pip install -r .\mail-gateway\requirements.txt
 python -m pip install -r .\TurnstileSolver\requirements.txt
 cd .\ui
@@ -82,14 +82,14 @@ npm install
 方式 2：显式初始化。
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 .\scripts\init-runtime-config.ps1
 ```
 
 BAT：
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 .\scripts\init-runtime-config.bat
 ```
 
@@ -123,14 +123,14 @@ mail_gateway:
 PowerShell：
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 .\scripts\start-dev-stack.ps1
 ```
 
 BAT：
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 .\scripts\start-dev-stack.bat
 ```
 
@@ -145,14 +145,14 @@ cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
 PowerShell：
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 .\scripts\build-desktop.ps1
 ```
 
 BAT：
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 .\scripts\build-desktop.bat
 ```
 
@@ -167,14 +167,14 @@ target/release/bundle
 PowerShell：
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 .\scripts\run-cli-registration.ps1
 ```
 
 BAT：
 
 ```powershell
-cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+cd orchids_register
 .\scripts\run-cli-registration.bat
 ```
 
@@ -246,3 +246,4 @@ register_result.json
 - YAML 运行配置
 - PowerShell / BAT 一键脚本
 - GitHub 提交流程文档
+

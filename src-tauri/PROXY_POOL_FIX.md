@@ -74,7 +74,7 @@ Each concurrent registration task created its own `ProxyPool` instance, causing 
 ## Testing
 
 To test the fix:
-1. Ensure local captcha API is running: `python D:\Code\grokzhuce-main\打码\api_solver.py`
+1. Ensure local captcha API is running: `python ..\TurnstileSolver\api_solver.py`
 2. Configure freemail settings in the app
 3. Start batch registration with proxy pool enabled
 4. Monitor logs - should see:
@@ -86,3 +86,4 @@ To test the fix:
 - [src/proxy_pool.rs](src/proxy_pool.rs) - Core synchronization logic
 - [src/workflow.rs](src/workflow.rs) - Accept shared pool parameter
 - [src-tauri/src/commands/register.rs](src-tauri/src/commands/register.rs) - Create and share pool in batch mode
+
