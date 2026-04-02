@@ -11,12 +11,14 @@
 - `config/runtime.example.yaml`：配置模板
 - `config/runtime.local.yaml`：本地实际配置，优先读取，已加入 `.gitignore`
 - `scripts/common.ps1`：脚本公共函数
+- `scripts/init-runtime-config.ps1`：显式生成或覆盖 `runtime.local.yaml`
 - `scripts/start-mail-gateway.ps1`：启动邮箱网关
 - `scripts/start-turnstile-solver.ps1`：启动验证码求解服务
 - `scripts/start-desktop-dev.ps1`：启动桌面开发模式
 - `scripts/start-dev-stack.ps1`：一键启动开发全套
 - `scripts/build-desktop.ps1`：一键打包桌面应用
 - `scripts/run-cli-registration.ps1`：按 YAML 配置执行一次 CLI 注册验证
+- `scripts/init-runtime-config.bat`：PowerShell 初始化脚本包装
 - `scripts/start-dev-stack.bat`：PowerShell 启动器包装
 - `scripts/build-desktop.bat`：PowerShell 打包器包装
 - `scripts/run-cli-registration.bat`：PowerShell CLI 验证包装
@@ -38,7 +40,36 @@
 
 也就是说，你平时只需要改 `runtime.local.yaml`。
 
-### 2.1 你必须先改的字段
+### 2.1 自动生成规则
+
+现在开始，你不需要手动复制模板。
+
+当下面任意脚本执行时：
+
+- `init-runtime-config.ps1`
+- `start-mail-gateway.ps1`
+- `start-turnstile-solver.ps1`
+- `start-desktop-dev.ps1`
+- `start-dev-stack.ps1`
+- `build-desktop.ps1`
+- `run-cli-registration.ps1`
+
+如果 `config/runtime.local.yaml` 不存在，脚本会自动从 `config/runtime.example.yaml` 生成一份本地配置。
+
+如果你想显式初始化：
+
+```powershell
+cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+.\scripts\init-runtime-config.ps1
+```
+
+如果你想强制覆盖已有本地配置：
+
+```powershell
+.\scripts\init-runtime-config.ps1 -Force
+```
+
+### 2.2 你必须先改的字段
 
 先打开 [runtime.local.yaml](/D:/workspace/github/Orchids_register_TurnstileSolver/orchids_register/config/runtime.local.yaml)，至少确认这些值：
 
@@ -79,7 +110,7 @@ orchids:
 - 把 `luckmail_api_key` 改成你的真实 Key
 - 如果你想改端口，也要同步改 `orchids.mail_gateway_base_url`
 
-### 2.2 YAML 使用限制
+### 2.3 YAML 使用限制
 
 当前脚本里的 YAML 解析器是我为这个项目写的简化版，所以请按现有格式改，不要超出这个范围。
 
@@ -114,7 +145,14 @@ npm install
 
 ## 4. 最短使用方式
 
-### 4.1 一键启动开发全套
+### 4.1 一键初始化本地配置
+
+```powershell
+cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+.\scripts\init-runtime-config.ps1
+```
+
+### 4.2 一键启动开发全套
 
 PowerShell：
 
@@ -136,7 +174,7 @@ cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
 - `TurnstileSolver`
 - `cargo tauri dev`
 
-### 4.2 一键打包桌面应用
+### 4.3 一键打包桌面应用
 
 PowerShell：
 
@@ -152,7 +190,7 @@ cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
 .\scripts\build-desktop.bat
 ```
 
-### 4.3 一键执行一次 CLI 注册验证
+### 4.4 一键执行一次 CLI 注册验证
 
 PowerShell：
 
@@ -176,21 +214,28 @@ D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register\register_r
 
 ## 5. 单独启动某个部分
 
-### 5.1 单独启动 mail-gateway
+### 5.1 单独初始化配置
+
+```powershell
+cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+.\scripts\init-runtime-config.ps1
+```
+
+### 5.2 单独启动 mail-gateway
 
 ```powershell
 cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
 .\scripts\start-mail-gateway.ps1
 ```
 
-### 5.2 单独启动 TurnstileSolver
+### 5.3 单独启动 TurnstileSolver
 
 ```powershell
 cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
 .\scripts\start-turnstile-solver.ps1
 ```
 
-### 5.3 单独启动桌面开发模式
+### 5.4 单独启动桌面开发模式
 
 ```powershell
 cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
@@ -205,6 +250,7 @@ cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
 
 ```powershell
 cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+.\scripts\init-runtime-config.ps1 -DryRun
 .\scripts\start-mail-gateway.ps1 -DryRun
 .\scripts\start-turnstile-solver.ps1 -DryRun
 .\scripts\start-desktop-dev.ps1 -DryRun
@@ -213,7 +259,7 @@ cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
 .\scripts\run-cli-registration.ps1 -DryRun
 ```
 
-这会打印最终命令，但不会真正启动进程。
+这会打印最终动作，但不会真正启动进程。
 
 ## 7. 手动命令兜底
 
@@ -312,15 +358,25 @@ D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register\mail-gatew
 
 ## 10. 常见问题
 
-### 10.1 `luckmail` 不是 `enabled`
+### 10.1 `runtime.local.yaml` 不存在
+
+现在脚本会自动生成它。
+
+你也可以手动执行：
+
+```powershell
+.\scripts\init-runtime-config.ps1
+```
+
+### 10.2 `luckmail` 不是 `enabled`
 
 大概率是 [runtime.local.yaml](/D:/workspace/github/Orchids_register_TurnstileSolver/orchids_register/config/runtime.local.yaml) 里的 `luckmail_api_key` 还没换成真实值。
 
-### 10.2 一键脚本打开了窗口，但服务没起来
+### 10.3 一键脚本打开了窗口，但服务没起来
 
 先看新窗口里打印的实际命令，再单独执行对应 `.ps1`。
 
-### 10.3 `cargo tauri build` 失败
+### 10.4 `cargo tauri build` 失败
 
 先拆开执行：
 
@@ -334,10 +390,11 @@ cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
 cargo check -p orchids-auto-register-portable
 ```
 
-### 10.4 我不想碰 PowerShell，只想双击
+### 10.5 我不想碰 PowerShell，只想双击
 
 直接双击：
 
+- `scripts\init-runtime-config.bat`
 - `scripts\start-dev-stack.bat`
 - `scripts\build-desktop.bat`
 - `scripts\run-cli-registration.bat`

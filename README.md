@@ -7,7 +7,8 @@
 - 桌面端只关心统一的邮箱网关协议
 - 验证码求解继续由独立的 `TurnstileSolver` 服务负责
 - 当前已接通 `LuckMail purchased inbox` 流程
-- 本地运行参数统一收敛到 `YAML` 配置文件，不再要求你每次手敲环境变量
+- 本地运行参数统一收敛到 `YAML` 配置文件
+- 当 `config/runtime.local.yaml` 不存在时，脚本会自动从模板生成一份
 
 ## 功能概览
 
@@ -15,7 +16,7 @@
 - CLI 注册入口：`cargo run --bin orchids-auto-register`
 - 邮箱网关服务：`mail-gateway`
 - 验证码求解服务：`TurnstileSolver`
-- 一键脚本：支持开发启动、CLI 验证、桌面打包
+- 一键脚本：支持配置初始化、开发启动、CLI 验证、桌面打包
 
 ## 当前邮箱接入策略
 
@@ -70,7 +71,35 @@ cd .\ui
 npm install
 ```
 
-### 2. 修改本地配置
+### 2. 初始化本地配置
+
+你不需要手动复制模板。
+
+方式 1：直接运行任意主脚本。
+
+- 如果 `config/runtime.local.yaml` 不存在，脚本会自动从 `config/runtime.example.yaml` 生成一份。
+
+方式 2：显式初始化。
+
+```powershell
+cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+.\scripts\init-runtime-config.ps1
+```
+
+BAT：
+
+```powershell
+cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
+.\scripts\init-runtime-config.bat
+```
+
+如果你要强制用模板覆盖已有本地配置：
+
+```powershell
+.\scripts\init-runtime-config.ps1 -Force
+```
+
+### 3. 修改本地配置
 
 编辑：
 
@@ -89,7 +118,7 @@ mail_gateway:
 - 提交到 GitHub 时不会上传你的真实本地配置
 - 仓库里保留的是模板文件 [`config/runtime.example.yaml`](config/runtime.example.yaml)
 
-### 3. 一键启动开发全套
+### 4. 一键启动开发全套
 
 PowerShell：
 
@@ -111,7 +140,7 @@ cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
 - `TurnstileSolver`
 - `cargo tauri dev`
 
-### 4. 一键打包桌面应用
+### 5. 一键打包桌面应用
 
 PowerShell：
 
@@ -133,7 +162,7 @@ cd D:\workspace\github\Orchids_register_TurnstileSolver\orchids_register
 target/release/bundle
 ```
 
-### 5. 一键跑一次 CLI 注册验证
+### 6. 一键跑一次 CLI 注册验证
 
 PowerShell：
 
@@ -157,6 +186,7 @@ register_result.json
 
 ## 主要脚本
 
+- [`scripts/init-runtime-config.ps1`](scripts/init-runtime-config.ps1)：初始化或覆盖 `runtime.local.yaml`
 - [`scripts/start-dev-stack.ps1`](scripts/start-dev-stack.ps1)：一键启动 `mail-gateway + TurnstileSolver + cargo tauri dev`
 - [`scripts/build-desktop.ps1`](scripts/build-desktop.ps1)：一键打包桌面端
 - [`scripts/run-cli-registration.ps1`](scripts/run-cli-registration.ps1)：一键跑一次 CLI 注册验证
@@ -173,10 +203,11 @@ register_result.json
 例如：
 
 ```powershell
+.\scripts\init-runtime-config.ps1 -DryRun
 .\scripts\start-dev-stack.ps1 -DryRun
 ```
 
-这样只打印最终命令，不真正启动进程。
+这样只打印最终动作，不真正启动进程。
 
 ## 文档索引
 
