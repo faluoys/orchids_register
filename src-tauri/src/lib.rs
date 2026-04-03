@@ -1,6 +1,7 @@
 mod commands;
 mod db;
 mod orchids_profile;
+mod service_manager;
 mod state;
 
 use state::AppState;
@@ -44,6 +45,11 @@ pub fn run() {
             commands::config::reset_config,
             commands::config::test_proxy,
             commands::config::test_mail_gateway_health,
+            commands::services::get_service_status,
+            commands::services::start_mail_gateway,
+            commands::services::stop_mail_gateway,
+            commands::services::start_turnstile_solver,
+            commands::services::stop_turnstile_solver,
             commands::domains::list_domains,
             commands::domains::create_domain,
             commands::domains::update_domain,

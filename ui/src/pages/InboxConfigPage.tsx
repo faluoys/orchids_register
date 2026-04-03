@@ -1,104 +1,214 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Loader2 } from "lucide-react";
-import { getAllConfig, saveConfig, testMailGatewayHealth } from "@/lib/tauri-api";
-import type { MailGatewayHealthResult } from "@/lib/types";
+import {
+  getAllConfig,
+  getServiceStatus,
+  saveConfig,
+  startMailGateway,
+  stopMailGateway,
+  testMailGatewayHealth,
+} from "@/lib/tauri-api";
+import type { MailGatewayHealthResult, ServiceStatus } from "@/lib/types";
 
-const DEFAULT_MAIL_MODE = "gateway";
-const DEFAULT_MAIL_GATEWAY_BASE_URL = "http://127.0.0.1:8081";
-const DEFAULT_MAIL_PROVIDER = "luckmail";
-const DEFAULT_MAIL_PROVIDER_MODE = "purchased";
-const DEFAULT_MAIL_PROJECT_CODE = "orchids";
-const MANAGED_CONFIG_KEYS = [
+const DEFAULTS = {
+  mail_mode: "gateway",
+  mail_gateway_host: "127.0.0.1",
+  mail_gateway_port: "8081",
+  mail_gateway_database_path: "mail-gateway/data/mail_gateway.db",
+  mail_gateway_api_key: "",
+  mail_provider: "luckmail",
+  mail_provider_mode: "purchased",
+  mail_project_code: "orchids",
+  mail_domain: "",
+  luckmail_base_url: "https://mails.luckyous.com",
+  luckmail_api_key: "",
+  yyds_base_url: "https://maliapi.215.im/v1",
+  yyds_api_key: "",
+} as const;
+
+const SAVE_KEYS = [
   "mail_mode",
+  "mail_gateway_host",
+  "mail_gateway_port",
+  "mail_gateway_database_path",
   "mail_gateway_base_url",
   "mail_gateway_api_key",
   "mail_provider",
   "mail_provider_mode",
   "mail_project_code",
   "mail_domain",
+  "luckmail_base_url",
+  "luckmail_api_key",
+  "yyds_base_url",
+  "yyds_api_key",
 ] as const;
-const CLEARABLE_CONFIG_KEYS = new Set<string>([
+
+const CLEARABLE_KEYS = new Set<string>([
   "mail_gateway_api_key",
   "mail_project_code",
   "mail_domain",
+  "luckmail_api_key",
+  "yyds_api_key",
 ]);
+
+function deriveMailGatewayBaseUrl(configs: Record<string, string>): string {
+  const host = (configs["mail_gateway_host"] || DEFAULTS.mail_gateway_host).trim();
+  const port = (configs["mail_gateway_port"] || DEFAULTS.mail_gateway_port).trim();
+  return `http://${host}:${port}`;
+}
+
+function normalizeConfigs(config: Record<string, string>): Record<string, string> {
+  const next = {
+    ...config,
+    mail_mode: config["mail_mode"] || DEFAULTS.mail_mode,
+    mail_gateway_host: config["mail_gateway_host"] || DEFAULTS.mail_gateway_host,
+    mail_gateway_port: config["mail_gateway_port"] || DEFAULTS.mail_gateway_port,
+    mail_gateway_database_path:
+      config["mail_gateway_database_path"] || DEFAULTS.mail_gateway_database_path,
+    mail_gateway_api_key: config["mail_gateway_api_key"] || DEFAULTS.mail_gateway_api_key,
+    mail_provider: config["mail_provider"] || DEFAULTS.mail_provider,
+    mail_provider_mode: config["mail_provider_mode"] || DEFAULTS.mail_provider_mode,
+    mail_project_code: config["mail_project_code"] || DEFAULTS.mail_project_code,
+    mail_domain: config["mail_domain"] || DEFAULTS.mail_domain,
+    luckmail_base_url: config["luckmail_base_url"] || DEFAULTS.luckmail_base_url,
+    luckmail_api_key: config["luckmail_api_key"] || DEFAULTS.luckmail_api_key,
+    yyds_base_url: config["yyds_base_url"] || DEFAULTS.yyds_base_url,
+    yyds_api_key: config["yyds_api_key"] || DEFAULTS.yyds_api_key,
+  };
+
+  return {
+    ...next,
+    mail_gateway_base_url: deriveMailGatewayBaseUrl(next),
+  };
+}
+
+function buildSavePayload(configs: Record<string, string>): Record<string, string> {
+  const payload: Record<string, string> = {
+    mail_gateway_base_url: deriveMailGatewayBaseUrl(configs),
+  };
+
+  for (const key of SAVE_KEYS) {
+    const value = (configs[key] || "").trim();
+    if (value || CLEARABLE_KEYS.has(key)) {
+      payload[key] = value;
+    }
+  }
+
+  return payload;
+}
 
 export default function InboxConfigPage() {
   const [configs, setConfigs] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
+  const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null);
+  const [serviceBusy, setServiceBusy] = useState<"start" | "stop" | "restart" | null>(null);
+  const [serviceError, setServiceError] = useState<string | null>(null);
   const [healthTesting, setHealthTesting] = useState(false);
   const [healthResult, setHealthResult] = useState<MailGatewayHealthResult | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const refreshServiceStatus = useCallback(async () => {
+    try {
+      const statuses = await getServiceStatus();
+      setServiceStatus(statuses.mail_gateway);
+    } catch (error) {
+      setServiceError(String(error));
+    }
+  }, []);
+
+  const persistConfig = useCallback(async (next: Record<string, string>) => {
+    await saveConfig(buildSavePayload(next));
+  }, []);
+
   const loadConfig = useCallback(async () => {
     setLoading(true);
     try {
       const config = await getAllConfig();
-      const next = {
-        ...config,
-        mail_mode: config["mail_mode"] || DEFAULT_MAIL_MODE,
-        mail_gateway_base_url: config["mail_gateway_base_url"] || DEFAULT_MAIL_GATEWAY_BASE_URL,
-        mail_gateway_api_key: config["mail_gateway_api_key"] || "",
-        mail_provider: config["mail_provider"] || DEFAULT_MAIL_PROVIDER,
-        mail_provider_mode: config["mail_provider_mode"] || DEFAULT_MAIL_PROVIDER_MODE,
-        mail_project_code: config["mail_project_code"] || DEFAULT_MAIL_PROJECT_CODE,
-        mail_domain: config["mail_domain"] || "",
-      };
+      const next = normalizeConfigs(config);
       setConfigs(next);
-      await saveConfig({
-        mail_mode: next.mail_mode,
-        mail_gateway_base_url: next.mail_gateway_base_url,
-        mail_gateway_api_key: next.mail_gateway_api_key,
-        mail_provider: next.mail_provider,
-        mail_provider_mode: next.mail_provider_mode,
-        mail_project_code: next.mail_project_code,
-        mail_domain: next.mail_domain,
-      });
-    } catch (e) {
-      console.error("加载收件配置失败:", e);
+      await persistConfig(next);
+      await refreshServiceStatus();
+    } catch (error) {
+      console.error("加载收件配置失败:", error);
+      setServiceError(String(error));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [persistConfig, refreshServiceStatus]);
 
   useEffect(() => {
     void loadConfig();
   }, [loadConfig]);
 
-  const autoSave = useCallback((newConfigs: Record<string, string>) => {
-    if (debounceRef.current) clearTimeout(debounceRef.current);
+  const autoSave = useCallback((next: Record<string, string>) => {
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+    }
     debounceRef.current = setTimeout(async () => {
       setSaveStatus("saving");
       try {
-        const toSave: Record<string, string> = {};
-        for (const key of MANAGED_CONFIG_KEYS) {
-          const value = (newConfigs[key] || "").trim();
-          if (value || CLEARABLE_CONFIG_KEYS.has(key)) {
-            toSave[key] = value;
-          }
-        }
-        await saveConfig(toSave);
+        await persistConfig(next);
         setSaveStatus("saved");
         setTimeout(() => setSaveStatus("idle"), 1500);
-      } catch (e) {
-        console.error("自动保存失败:", e);
+      } catch (error) {
+        console.error("自动保存收件配置失败:", error);
         setSaveStatus("idle");
       }
     }, 600);
-  }, []);
+  }, [persistConfig]);
 
   useEffect(() => {
     return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+      }
     };
   }, []);
 
   const updateConfig = (key: string, value: string) => {
-    const next = { ...configs, [key]: value };
+    const next = normalizeConfigs({ ...configs, [key]: value });
     setConfigs(next);
     autoSave(next);
+  };
+
+  const runServiceAction = async (action: "start" | "stop" | "restart") => {
+    setServiceBusy(action);
+    setServiceError(null);
+    try {
+      await persistConfig(configs);
+      if (action === "start") {
+        setServiceStatus(await startMailGateway());
+      } else if (action === "stop") {
+        setServiceStatus(await stopMailGateway());
+      } else {
+        await stopMailGateway();
+        setServiceStatus(await startMailGateway());
+      }
+      await refreshServiceStatus();
+    } catch (error) {
+      setServiceError(String(error));
+      await refreshServiceStatus();
+    } finally {
+      setServiceBusy(null);
+    }
+  };
+
+  const runHealthCheck = async () => {
+    const baseUrl = deriveMailGatewayBaseUrl(configs);
+    const apiKey = (configs["mail_gateway_api_key"] || "").trim() || null;
+    setHealthTesting(true);
+    setHealthResult(null);
+    setHealthError(null);
+    try {
+      const result = await testMailGatewayHealth(baseUrl, apiKey);
+      setHealthResult(result);
+    } catch (error) {
+      setHealthError(String(error));
+    } finally {
+      setHealthTesting(false);
+    }
   };
 
   if (loading) {
@@ -112,7 +222,10 @@ export default function InboxConfigPage() {
   return (
     <>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap", flexShrink: 0 }}>
-        <h1 className="page-title">收件配置</h1>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+          <h1 className="page-title">收件配置</h1>
+          <span className="page-subtitle">Mail Gateway 运行时与注册参数</span>
+        </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: "auto", fontSize: 12 }}>
           {saveStatus === "saving" && (
             <span style={{ color: "var(--muted)", display: "flex", alignItems: "center", gap: 4 }}>
@@ -132,95 +245,204 @@ export default function InboxConfigPage() {
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
         <div className="settings-grid">
           <div className="config-panel">
-            <div className="settings-title">Mail Gateway 配置</div>
+            <div className="service-card">
+              <div className="service-card-head">
+                <div>
+                  <div className="settings-title" style={{ marginBottom: 4 }}>
+                    Mail Gateway 服务
+                  </div>
+                  <div className="settings-hint" style={{ marginTop: 0 }}>
+                    由桌面端直接托管，不再依赖 runtime.local.yaml
+                  </div>
+                </div>
+                <span className={`service-pill ${serviceStatus?.running ? "running" : "stopped"}`}>
+                  {serviceStatus?.running ? "运行中" : "未启动"}
+                </span>
+              </div>
+
+              <div className="service-meta">
+                <span>Base URL: {deriveMailGatewayBaseUrl(configs)}</span>
+                <span>PID: {serviceStatus?.pid ?? "-"}</span>
+                <span>最近启动: {serviceStatus?.last_started_at || "-"}</span>
+              </div>
+
+              <div className="service-actions">
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={serviceBusy !== null}
+                  onClick={() => void runServiceAction("start")}
+                >
+                  {serviceBusy === "start" ? <Loader2 size={12} className="animate-spin" /> : null}
+                  启动
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-clear"
+                  disabled={serviceBusy !== null}
+                  onClick={() => void runServiceAction("restart")}
+                >
+                  {serviceBusy === "restart" ? <Loader2 size={12} className="animate-spin" /> : null}
+                  重启
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-danger"
+                  disabled={serviceBusy !== null}
+                  onClick={() => void runServiceAction("stop")}
+                >
+                  {serviceBusy === "stop" ? <Loader2 size={12} className="animate-spin" /> : null}
+                  停止
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-clear"
+                  disabled={healthTesting}
+                  onClick={() => void runHealthCheck()}
+                >
+                  {healthTesting ? <Loader2 size={12} className="animate-spin" /> : null}
+                  健康检查
+                </button>
+              </div>
+
+              {serviceError ? (
+                <div className="service-error">{serviceError}</div>
+              ) : null}
+              {serviceStatus?.last_error ? (
+                <div className="service-error">{serviceStatus.last_error}</div>
+              ) : null}
+              {healthError ? (
+                <div className="service-error">{healthError}</div>
+              ) : null}
+              {healthResult ? (
+                <div className="service-ok">
+                  健康检查通过: status={healthResult.status}, timestamp={healthResult.timestamp}
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="config-panel">
+            <div className="settings-title">Mail Gateway 运行参数</div>
+            <div className="form-row">
+              <div className="form-group" style={{ flex: 1 }}>
+                <label>Host</label>
+                <input
+                  type="text"
+                  value={configs["mail_gateway_host"] || ""}
+                  onChange={(event) => updateConfig("mail_gateway_host", event.target.value)}
+                  className="input"
+                />
+              </div>
+              <div className="form-group" style={{ width: 160 }}>
+                <label>Port</label>
+                <input
+                  type="text"
+                  value={configs["mail_gateway_port"] || ""}
+                  onChange={(event) => updateConfig("mail_gateway_port", event.target.value)}
+                  className="input"
+                />
+              </div>
+            </div>
+            <div className="form-group">
+              <label>数据库路径</label>
+              <input
+                type="text"
+                value={configs["mail_gateway_database_path"] || ""}
+                onChange={(event) => updateConfig("mail_gateway_database_path", event.target.value)}
+                className="input"
+                style={{ width: "100%" }}
+              />
+              <div className="settings-hint">相对路径会按仓库根目录解析。</div>
+            </div>
+            <div className="form-group">
+              <label>桌面端使用的 Base URL</label>
+              <input
+                type="text"
+                value={deriveMailGatewayBaseUrl(configs)}
+                readOnly
+                className="input"
+                style={{ width: "100%", background: "rgba(255,255,255,0.72)" }}
+              />
+              <div className="settings-hint">由 Host + Port 自动生成，并同步给注册流程使用。</div>
+            </div>
+            <div className="form-group">
+              <label>Gateway Client API Key</label>
+              <input
+                type="password"
+                value={configs["mail_gateway_api_key"] || ""}
+                onChange={(event) => updateConfig("mail_gateway_api_key", event.target.value)}
+                className="input"
+                style={{ width: "100%" }}
+              />
+              <div className="settings-hint">当前若网关没有启用鉴权，可以留空。</div>
+            </div>
+          </div>
+
+          <div className="config-panel">
+            <div className="settings-title">Provider 源配置</div>
+            <div className="form-group">
+              <label>LuckMail Base URL</label>
+              <input
+                type="text"
+                value={configs["luckmail_base_url"] || ""}
+                onChange={(event) => updateConfig("luckmail_base_url", event.target.value)}
+                className="input"
+                style={{ width: "100%" }}
+              />
+            </div>
+            <div className="form-group">
+              <label>LuckMail API Key</label>
+              <input
+                type="password"
+                value={configs["luckmail_api_key"] || ""}
+                onChange={(event) => updateConfig("luckmail_api_key", event.target.value)}
+                className="input"
+                style={{ width: "100%" }}
+              />
+            </div>
+            <div className="form-group">
+              <label>YYDS Base URL</label>
+              <input
+                type="text"
+                value={configs["yyds_base_url"] || ""}
+                onChange={(event) => updateConfig("yyds_base_url", event.target.value)}
+                className="input"
+                style={{ width: "100%" }}
+              />
+            </div>
+            <div className="form-group" style={{ marginBottom: 0 }}>
+              <label>YYDS API Key</label>
+              <input
+                type="password"
+                value={configs["yyds_api_key"] || ""}
+                onChange={(event) => updateConfig("yyds_api_key", event.target.value)}
+                className="input"
+                style={{ width: "100%" }}
+              />
+            </div>
+          </div>
+
+          <div className="config-panel">
+            <div className="settings-title">注册使用的收件参数</div>
             <div className="form-group">
               <label>邮件模式</label>
               <select
-                value={configs["mail_mode"] || DEFAULT_MAIL_MODE}
-                onChange={(e) => updateConfig("mail_mode", e.target.value)}
+                value={configs["mail_mode"] || DEFAULTS.mail_mode}
+                onChange={(event) => updateConfig("mail_mode", event.target.value)}
                 className="input"
                 style={{ width: 220 }}
               >
                 <option value="gateway">gateway</option>
                 <option value="manual">manual</option>
               </select>
-              <div className="settings-hint">
-                当前主活动路径应使用 gateway；manual 仅用于手动提供邮箱。
-              </div>
-            </div>
-            <div className="form-group">
-              <label>Base URL</label>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, maxWidth: 760 }}>
-                <input
-                  type="text"
-                  value={configs["mail_gateway_base_url"] || ""}
-                  onChange={(e) => updateConfig("mail_gateway_base_url", e.target.value)}
-                  placeholder={DEFAULT_MAIL_GATEWAY_BASE_URL}
-                  className="input"
-                  style={{ flex: 1, minWidth: 0 }}
-                />
-                <button
-                  type="button"
-                  className="btn btn-sm"
-                  disabled={healthTesting}
-                  onClick={async () => {
-                    const baseUrl = (configs["mail_gateway_base_url"] || DEFAULT_MAIL_GATEWAY_BASE_URL).trim();
-                    const apiKey = (configs["mail_gateway_api_key"] || "").trim() || null;
-                    setHealthTesting(true);
-                    setHealthResult(null);
-                    setHealthError(null);
-                    try {
-                      const res = await testMailGatewayHealth(baseUrl, apiKey);
-                      setHealthResult(res);
-                    } catch (e: any) {
-                      setHealthError(String(e));
-                    } finally {
-                      setHealthTesting(false);
-                    }
-                  }}
-                  style={{ minWidth: 86, justifyContent: "center" }}
-                >
-                  {healthTesting ? (
-                    <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                      <Loader2 size={12} className="animate-spin" />
-                      测试中...
-                    </span>
-                  ) : (
-                    "测试"
-                  )}
-                </button>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-                {healthResult && (
-                  <span style={{ fontSize: 12, color: "var(--ok)" }}>
-                    健康检查通过：status={healthResult.status}，timestamp={healthResult.timestamp}
-                  </span>
-                )}
-                {healthError && (
-                  <span style={{ fontSize: 12, color: "var(--error)" }}>
-                    {healthError}
-                  </span>
-                )}
-              </div>
-            </div>
-            <div className="form-group">
-              <label>API Key</label>
-              <input
-                type="password"
-                value={configs["mail_gateway_api_key"] || ""}
-                onChange={(e) => updateConfig("mail_gateway_api_key", e.target.value)}
-                placeholder="可选，网关开启鉴权时填写"
-                className="input"
-                style={{ width: "100%", maxWidth: 640 }}
-              />
             </div>
             <div className="form-group">
               <label>Provider</label>
               <input
                 type="text"
-                value={configs["mail_provider"] || DEFAULT_MAIL_PROVIDER}
-                onChange={(e) => updateConfig("mail_provider", e.target.value)}
-                placeholder={DEFAULT_MAIL_PROVIDER}
+                value={configs["mail_provider"] || ""}
+                onChange={(event) => updateConfig("mail_provider", event.target.value)}
                 className="input"
                 style={{ width: "100%", maxWidth: 320 }}
               />
@@ -229,9 +451,8 @@ export default function InboxConfigPage() {
               <label>Provider Mode</label>
               <input
                 type="text"
-                value={configs["mail_provider_mode"] || DEFAULT_MAIL_PROVIDER_MODE}
-                onChange={(e) => updateConfig("mail_provider_mode", e.target.value)}
-                placeholder={DEFAULT_MAIL_PROVIDER_MODE}
+                value={configs["mail_provider_mode"] || ""}
+                onChange={(event) => updateConfig("mail_provider_mode", event.target.value)}
                 className="input"
                 style={{ width: "100%", maxWidth: 320 }}
               />
@@ -241,54 +462,42 @@ export default function InboxConfigPage() {
               <input
                 type="text"
                 value={configs["mail_project_code"] || ""}
-                onChange={(e) => updateConfig("mail_project_code", e.target.value)}
-                placeholder={DEFAULT_MAIL_PROJECT_CODE}
+                onChange={(event) => updateConfig("mail_project_code", event.target.value)}
                 className="input"
                 style={{ width: "100%", maxWidth: 320 }}
               />
             </div>
-            <div className="form-group">
-              <label>Domain</label>
+            <div className="form-group" style={{ marginBottom: 0 }}>
+              <label>指定域名</label>
               <input
                 type="text"
                 value={configs["mail_domain"] || ""}
-                onChange={(e) => updateConfig("mail_domain", e.target.value)}
-                placeholder="留空表示由网关/provider 自行选择"
+                onChange={(event) => updateConfig("mail_domain", event.target.value)}
                 className="input"
                 style={{ width: "100%", maxWidth: 320 }}
               />
+              <div className="settings-hint">留空时由 mail-gateway/provider 自行选择。</div>
             </div>
-            <div className="form-group">
-              <label>Provider 状态</label>
-              <div className="settings-hint" style={{ marginBottom: 8 }}>
-                健康检查会返回各 provider 的可用状态。
-              </div>
-              <div style={{ display: "grid", gap: 8, maxWidth: 420 }}>
-                {healthResult ? (
-                  Object.entries(healthResult.providers).map(([provider, status]) => (
-                    <div
-                      key={provider}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        padding: "10px 12px",
-                        border: "1px solid var(--border)",
-                        borderRadius: 10,
-                        background: "var(--panel)",
-                        fontSize: 13,
-                      }}
-                    >
-                      <span style={{ color: "var(--text)" }}>{provider}</span>
-                      <span style={{ color: status === "enabled" ? "var(--ok)" : "var(--muted)" }}>
-                        {status}
-                      </span>
-                    </div>
-                  ))
-                ) : (
-                  <div className="settings-hint">尚未执行健康检查。</div>
-                )}
-              </div>
+          </div>
+
+          <div className="config-panel">
+            <div className="settings-title">Provider 健康状态</div>
+            <div className="settings-hint" style={{ marginBottom: 10 }}>
+              健康检查会读取当前服务返回的 provider 可用状态。
+            </div>
+            <div style={{ display: "grid", gap: 8 }}>
+              {healthResult ? (
+                Object.entries(healthResult.providers).map(([provider, status]) => (
+                  <div key={provider} className="service-provider-row">
+                    <span>{provider}</span>
+                    <span style={{ color: status === "enabled" ? "var(--ok)" : "var(--muted)" }}>
+                      {status}
+                    </span>
+                  </div>
+                ))
+              ) : (
+                <div className="settings-hint">尚未执行健康检查。</div>
+              )}
             </div>
           </div>
         </div>

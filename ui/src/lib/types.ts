@@ -89,6 +89,15 @@ export interface RegisterArgs {
   proxy_pool_api: string;
 }
 
+export type ManagedServiceName = "mail_gateway" | "turnstile_solver";
+
+export interface ServiceStatus {
+  running: boolean;
+  pid: number | null;
+  last_started_at: string | null;
+  last_error: string | null;
+}
+
 export interface MailGatewayHealthResult {
   status: string;
   timestamp: number;

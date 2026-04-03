@@ -51,6 +51,30 @@ fn normalize_client_cookie(raw: &str) -> Option<String> {
     }
 }
 
+fn normalize_optional_text(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn build_profile_session_context(account: &db::Account) -> Option<orchids_profile::ExistingSessionContext> {
+    let session_id = normalize_optional_text(account.created_session_id.as_deref());
+    let user_id = normalize_optional_text(account.created_user_id.as_deref());
+    let session_jwt = normalize_optional_text(account.desktop_jwt.as_deref());
+
+    let has_way_to_get_jwt = session_jwt.is_some() || session_id.is_some();
+    let has_way_to_get_user = user_id.is_some() || session_id.is_some();
+    if has_way_to_get_jwt && has_way_to_get_user {
+        Some(orchids_profile::ExistingSessionContext {
+            session_id,
+            user_id,
+            session_jwt,
+        })
+    } else {
+        None
+    }
+}
+
 fn filter_accounts_by_ids(
     accounts: Vec<db::Account>,
     ids: Option<&[i64]>,
@@ -182,17 +206,21 @@ pub async fn refresh_accounts_profile_missing(
     let to_refresh = limit.unwrap_or(5).clamp(1, 10);
 
     // 1) 读出需要补全的账号列表（快速释放锁）
-    let candidates: Vec<(i64, String, String)> = {
+    let candidates: Vec<(i64, String, String, Option<orchids_profile::ExistingSessionContext>)> = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let all = db::get_all_accounts(&conn, None, None).map_err(|e| e.to_string())?;
         all.into_iter()
             .filter(|a| {
+                let can_reuse_session = build_profile_session_context(a).is_some();
                 (a.register_complete || a.status == "complete")
                     && (a.plan.is_none() || a.credits.is_none())
-                    && !a.password.trim().is_empty()
+                    && (can_reuse_session || !a.password.trim().is_empty())
             })
             .take(to_refresh)
-            .map(|a| (a.id, a.email, a.password))
+            .map(|a| {
+                let existing_session = build_profile_session_context(&a);
+                (a.id, a.email, a.password, existing_session)
+            })
             .collect()
     };
 
@@ -213,11 +241,17 @@ pub async fn refresh_accounts_profile_missing(
     let db: Arc<_> = state.db.clone();
     let mut handles = Vec::with_capacity(candidates.len());
 
-    for (id, email, password) in candidates {
+    for (id, email, password, existing_session) in candidates {
         let db = Arc::clone(&db);
         let proxy = proxy.clone();
         let handle = tokio::task::spawn_blocking(move || {
-            match orchids_profile::fetch_plan_and_credits(&email, &password, 30, proxy.as_deref()) {
+            match orchids_profile::fetch_plan_and_credits_with_session(
+                &email,
+                &password,
+                30,
+                proxy.as_deref(),
+                existing_session.as_ref(),
+            ) {
                 Ok(profile) => {
                     if let Ok(conn) = db.lock() {
                         let _ = db::update_account_plan_credits(
@@ -257,26 +291,33 @@ pub async fn refresh_account_profile(
     state: State<'_, AppState>,
     id: i64,
 ) -> Result<db::Account, String> {
-    let (email, password, proxy) = {
+    let (email, password, proxy, existing_session) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let all = db::get_all_accounts(&conn, None, None).map_err(|e| e.to_string())?;
         let account = all
             .into_iter()
             .find(|a| a.id == id)
             .ok_or_else(|| "账号不存在".to_string())?;
+        let existing_session = build_profile_session_context(&account);
         let proxy = db::get_all_config(&conn)
             .ok()
             .and_then(|c| c.get("proxy").cloned())
             .filter(|p| !p.is_empty());
-        (account.email, account.password, proxy)
+        (account.email, account.password, proxy, existing_session)
     };
 
-    if password.trim().is_empty() {
+    if password.trim().is_empty() && existing_session.is_none() {
         return Err("该账号密码为空，无法刷新套餐和 credits".to_string());
     }
 
     let profile = tokio::task::spawn_blocking(move || {
-        orchids_profile::fetch_plan_and_credits(&email, &password, 30, proxy.as_deref())
+        orchids_profile::fetch_plan_and_credits_with_session(
+            &email,
+            &password,
+            30,
+            proxy.as_deref(),
+            existing_session.as_ref(),
+        )
     })
     .await
     .map_err(|e| format!("刷新任务执行失败: {}", e))?
@@ -532,5 +573,37 @@ mod tests {
         let payload = render_export_payload(&[sample_account()], "cookie").unwrap();
         let value: Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(value, serde_json::json!(["cookie_123"]));
+    }
+
+    #[test]
+    fn build_profile_session_context_uses_saved_jwt_when_available() {
+        let context = build_profile_session_context(&sample_account()).expect("应构建出复用会话");
+
+        assert_eq!(context.session_id.as_deref(), Some("sess_123"));
+        assert_eq!(context.user_id.as_deref(), Some("user_123"));
+        assert_eq!(context.session_jwt.as_deref(), Some("jwt_123"));
+    }
+
+    #[test]
+    fn build_profile_session_context_accepts_session_id_without_jwt() {
+        let mut account = sample_account();
+        account.desktop_jwt = None;
+
+        let context = build_profile_session_context(&account).expect("session_id 应可用于后续换 jwt");
+
+        assert_eq!(context.session_id.as_deref(), Some("sess_123"));
+        assert_eq!(context.user_id.as_deref(), Some("user_123"));
+        assert_eq!(context.session_jwt, None);
+    }
+
+    #[test]
+    fn build_profile_session_context_rejects_incomplete_saved_session() {
+        let mut account = sample_account();
+        account.created_session_id = None;
+        account.created_user_id = None;
+
+        let context = build_profile_session_context(&account);
+
+        assert!(context.is_none(), "缺少 user_id/session_id 时不应尝试复用会话");
     }
 }

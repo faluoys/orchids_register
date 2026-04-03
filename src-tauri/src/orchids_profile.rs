@@ -32,6 +32,13 @@ pub struct ProfileResult {
     pub credits: Option<i64>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExistingSessionContext {
+    pub session_id: Option<String>,
+    pub user_id: Option<String>,
+    pub session_jwt: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct ActionCacheEntry {
     id: String,
@@ -52,14 +59,42 @@ impl fmt::Display for ProfileFetchError {
     }
 }
 
+#[allow(dead_code)]
 pub fn fetch_plan_and_credits(
     email: &str,
     password: &str,
     timeout: i64,
     proxy: Option<&str>,
 ) -> Result<ProfileResult, String> {
+    fetch_plan_and_credits_with_session(email, password, timeout, proxy, None)
+}
+
+pub fn fetch_plan_and_credits_with_session(
+    email: &str,
+    password: &str,
+    timeout: i64,
+    proxy: Option<&str>,
+    existing_session: Option<&ExistingSessionContext>,
+) -> Result<ProfileResult, String> {
     let (client, _) = create_client(proxy).map_err(|e| e.to_string())?;
 
+    if let Some(existing_session) = normalize_existing_session_context(existing_session) {
+        eprintln!(
+            "[profile] 尝试复用已有会话: {}",
+            describe_existing_session_context(&existing_session)
+        );
+        match fetch_profile_from_existing_session(&client, &existing_session, timeout) {
+            Ok(profile) => {
+                eprintln!("[profile] 复用已有会话获取 profile 成功");
+                return Ok(profile);
+            }
+            Err(err) => {
+                eprintln!("[profile] 复用已有会话失败，回退密码登录: {}", err);
+            }
+        }
+    }
+
+    eprintln!("[profile] 使用密码登录链路获取 profile");
     init_environment(&client, timeout)?;
     get_client(&client, timeout)?;
     let sign_in = sign_in_with_password(&client, email, password, timeout)?;
@@ -71,6 +106,82 @@ pub fn fetch_plan_and_credits(
     let session_jwt = fetch_session_jwt(&client, &session_id, timeout)?;
 
     fetch_profile(&client, &session_jwt, &user_id, timeout)
+}
+
+fn normalize_existing_session_context(
+    existing_session: Option<&ExistingSessionContext>,
+) -> Option<ExistingSessionContext> {
+    let existing_session = existing_session?;
+    let session_id = normalize_optional_text(existing_session.session_id.as_deref());
+    let user_id = normalize_optional_text(existing_session.user_id.as_deref());
+    let session_jwt = normalize_optional_text(existing_session.session_jwt.as_deref());
+
+    let has_way_to_get_jwt = session_jwt.is_some() || session_id.is_some();
+    let has_way_to_get_user = user_id.is_some() || session_id.is_some();
+    if has_way_to_get_jwt && has_way_to_get_user {
+        Some(ExistingSessionContext {
+            session_id,
+            user_id,
+            session_jwt,
+        })
+    } else {
+        None
+    }
+}
+
+fn normalize_optional_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn describe_existing_session_context(existing_session: &ExistingSessionContext) -> String {
+    format!(
+        "session_id={}, user_id={}, jwt={}",
+        existing_session.session_id.as_ref().map(|_| "yes").unwrap_or("no"),
+        existing_session.user_id.as_ref().map(|_| "yes").unwrap_or("no"),
+        existing_session.session_jwt.as_ref().map(|_| "yes").unwrap_or("no"),
+    )
+}
+
+fn fetch_profile_from_existing_session(
+    client: &reqwest::blocking::Client,
+    existing_session: &ExistingSessionContext,
+    timeout: i64,
+) -> Result<ProfileResult, String> {
+    let session_id = existing_session.session_id.as_deref();
+    let user_id = match existing_session.user_id.clone() {
+        Some(user_id) => user_id,
+        None => {
+            let session_id = session_id
+                .ok_or_else(|| "复用已有会话失败: 缺少 session_id，无法恢复 user_id".to_string())?;
+            let touch_data = touch_session(client, session_id, timeout)?;
+            extract_user_id_from_touch(&touch_data)
+                .ok_or_else(|| "复用已有会话失败: touch session 成功但未拿到 user_id".to_string())?
+        }
+    };
+
+    if let Some(session_jwt) = existing_session.session_jwt.as_deref() {
+        match fetch_profile(client, session_jwt, &user_id, timeout) {
+            Ok(profile) => return Ok(profile),
+            Err(err) => {
+                if let Some(session_id) = session_id {
+                    let fresh_session_jwt = fetch_session_jwt(client, session_id, timeout)
+                        .map_err(|refresh_err| format!("复用已有会话失败: {}; 刷新 session jwt 失败: {}", err, refresh_err))?;
+                    return fetch_profile(client, &fresh_session_jwt, &user_id, timeout)
+                        .map_err(|refresh_err| format!("复用已有会话失败: {}; 使用 session_id 刷新 jwt 后仍失败: {}", err, refresh_err));
+                }
+                return Err(format!("复用已有会话失败: {}", err));
+            }
+        }
+    }
+
+    let session_id =
+        session_id.ok_or_else(|| "复用已有会话失败: 缺少 session_id，无法换取 session jwt".to_string())?;
+    let session_jwt = fetch_session_jwt(client, session_id, timeout)?;
+    fetch_profile(client, &session_jwt, &user_id, timeout)
+        .map_err(|err| format!("复用已有会话失败: {}", err))
 }
 
 fn clerk_params() -> [(&'static str, &'static str); 2] {
@@ -223,12 +334,12 @@ fn fetch_profile(
 ) -> Result<ProfileResult, String> {
     let mut action_id = resolve_profile_action_id(client, timeout);
 
-    let mut last_err = match fetch_profile_with_action(client, session_jwt, user_id, &action_id, timeout, false) {
+    let mut last_err = match fetch_profile_with_action_enhanced(client, session_jwt, user_id, &action_id, timeout, false) {
         Ok(profile) => return Ok(profile),
         Err(ProfileFetchError::ActionNotFound(_)) => {
             invalidate_profile_action_cache();
             action_id = resolve_profile_action_id(client, timeout);
-            match fetch_profile_with_action(client, session_jwt, user_id, &action_id, timeout, false) {
+            match fetch_profile_with_action_enhanced(client, session_jwt, user_id, &action_id, timeout, false) {
                 Ok(profile) => return Ok(profile),
                 Err(err) => err,
             }
@@ -237,7 +348,7 @@ fn fetch_profile(
     };
 
     if profile_error_needs_context_retry(&last_err) {
-        match fetch_profile_with_action(client, session_jwt, user_id, &action_id, timeout, true) {
+        match fetch_profile_with_action_enhanced(client, session_jwt, user_id, &action_id, timeout, true) {
             Ok(profile) => return Ok(profile),
             Err(err) => last_err = err,
         }
@@ -246,6 +357,7 @@ fn fetch_profile(
     Err(last_err.to_string())
 }
 
+#[allow(dead_code)]
 fn fetch_profile_with_action(
     client: &reqwest::blocking::Client,
     session_jwt: &str,
@@ -304,6 +416,66 @@ fn fetch_profile_with_action(
 
     parse_profile_from_rsc_text(&raw)
         .ok_or_else(|| ProfileFetchError::Other(format!("响应中未找到 profile/credits 字段: {}", raw)))
+}
+
+fn fetch_profile_with_action_enhanced(
+    client: &reqwest::blocking::Client,
+    session_jwt: &str,
+    user_id: &str,
+    action_id: &str,
+    timeout: i64,
+    include_context: bool,
+) -> Result<ProfileResult, ProfileFetchError> {
+    let body = format!(r#"["{}"]"#, user_id);
+    let mut req = client
+        .post(format!("{ORCHIDS_WEB}/"))
+        .header("accept", "text/x-component")
+        .header("content-type", "text/plain;charset=UTF-8")
+        .header("origin", ORCHIDS_WEB)
+        .header("referer", format!("{ORCHIDS_WEB}/"))
+        .header("user-agent", user_agent())
+        .header("next-action", action_id)
+        .header("accept-language", "zh-CN,zh;q=0.9")
+        .header("sec-fetch-site", "same-origin")
+        .header("sec-fetch-mode", "cors")
+        .header("sec-fetch-dest", "empty")
+        .header("cookie", format!("__session={session_jwt}"))
+        .body(body);
+
+    if include_context {
+        let state_tree = fetch_next_router_state_tree(client, timeout)
+            .unwrap_or_else(|| DEFAULT_NEXT_ROUTER_STATE_TREE.to_string());
+        req = req.header("next-router-state-tree", state_tree);
+
+        if let Some(deployment_id) = get_home_deployment_id(client, timeout) {
+            req = req.header("x-deployment-id", deployment_id);
+        }
+    }
+
+    let resp = req
+        .timeout(req_timeout_secs(timeout))
+        .send()
+        .map_err(|e| ProfileFetchError::Other(e.to_string()))?;
+
+    let status = resp.status().as_u16();
+    let action_not_found = resp
+        .headers()
+        .get("x-nextjs-action-not-found")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    let raw = resp.text().unwrap_or_default();
+
+    if status >= 400 {
+        let message = profile_http_error_message(status, &raw);
+        if action_not_found || raw.to_ascii_lowercase().contains("server action not found") {
+            return Err(ProfileFetchError::ActionNotFound(message));
+        }
+        return Err(ProfileFetchError::Other(message));
+    }
+
+    parse_profile_from_rsc_text(&raw)
+        .ok_or_else(|| ProfileFetchError::Other(format!("鍝嶅簲涓湭鎵惧埌 profile/credits 瀛楁: {}", raw)))
 }
 
 fn profile_error_needs_context_retry(err: &ProfileFetchError) -> bool {
@@ -522,6 +694,22 @@ fn profile_response_needs_context_retry(status: u16, raw: &str) -> bool {
 
     let lower = raw.to_ascii_lowercase();
     lower.contains(r#""digest":"#) || lower.contains("\n1:e{")
+}
+
+fn profile_response_suggests_visitor_verification(status: u16, raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    (status >= 500 && (lower.contains(r#""digest":"#) || lower.contains("\n1:e{")))
+        || lower.contains("visitor")
+        || lower.contains("cf-challenge")
+        || lower.contains("turnstile")
+}
+
+fn profile_http_error_message(status: u16, raw: &str) -> String {
+    let mut message = format!("获取 profile 失败: HTTP {} -> {}", status, raw);
+    if profile_response_suggests_visitor_verification(status, raw) {
+        message.push_str("；疑似触发站点风控/真实访客校验，请先在浏览器完成登录与验证后重试，或优先复用当前账号已保存会话。");
+    }
+    message
 }
 
 fn extract_script_urls_from_html(html: &str) -> Vec<String> {
@@ -808,6 +996,31 @@ mod tests {
 1:E{"digest":"1288858246"}"#;
 
         assert!(profile_response_needs_context_retry(500, raw));
+    }
+
+    #[test]
+    fn profile_http_error_message_marks_possible_visitor_verification() {
+        let raw = r#"0:{"a":"$@1","f":"","b":"CGcit38jVgcutHMlYO4Mb","q":"","i":false}
+1:E{"digest":"1288858246"}"#;
+
+        let message = profile_http_error_message(500, raw);
+
+        assert!(message.contains("疑似触发站点风控"));
+        assert!(message.contains("真实访客"));
+    }
+
+    #[test]
+    fn describe_existing_session_context_reports_available_fields() {
+        let context = ExistingSessionContext {
+            session_id: Some("sess_123".to_string()),
+            user_id: None,
+            session_jwt: Some("jwt_123".to_string()),
+        };
+
+        assert_eq!(
+            describe_existing_session_context(&context),
+            "session_id=yes, user_id=no, jwt=yes"
+        );
     }
 
     #[test]
