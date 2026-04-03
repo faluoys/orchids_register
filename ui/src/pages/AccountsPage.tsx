@@ -20,6 +20,7 @@ import {
   refreshAccountProfile,
   deleteAccount,
   deleteAccounts,
+  exportAccounts,
   listAccountGroups,
   moveAccountsToGroup,
   saveTextFile,
@@ -129,7 +130,7 @@ function MoveGroupDialog({
   );
 }
 
-type ExportFormat = "cookie" | "orchids-tool";
+type ExportFormat = "cookie" | "orchids-tool" | "orchids-api";
 
 function ExportCookiesDialog({
   open,
@@ -161,6 +162,7 @@ function ExportCookiesDialog({
   const formatOptions: { key: ExportFormat; label: string; desc: string }[] = [
     { key: "cookie", label: "Client Cookie", desc: "仅导出 client_cookie 字段（JSON 数组）" },
     { key: "orchids-tool", label: "Orchids Tool", desc: "导出含 email、password、plan_name、user_id、client_cookie、credits、status 的完整信息" },
+    { key: "orchids-api", label: "Orchids API", desc: "导出 orchids-api 可直接导入的账号 JSON" },
   ];
 
   return (
@@ -554,6 +556,28 @@ export default function AccountsPage() {
         const fileName = `Orchids_tool_${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.json`;
 
         const saved = await saveTextFile(JSON.stringify(rows, null, 2), fileName);
+        if (saved) {
+          setExportOpen(false);
+        }
+      } else if (exportFormat === "orchids-api") {
+        const ids = source.map((a) => a.id);
+        if (ids.length === 0) {
+          alert("没有可导出的账号数据");
+          return;
+        }
+
+        const content = await exportAccounts(undefined, "orchids-api", ids);
+        const payload = JSON.parse(content) as { accounts?: unknown[] };
+        if (!Array.isArray(payload.accounts) || payload.accounts.length === 0) {
+          alert("没有可导出到 orchids-api 的完整账号数据，请先确认账号已生成 session_id、user_id 和 client_cookie");
+          return;
+        }
+
+        const now = new Date();
+        const pad = (n: number) => String(n).padStart(2, "0");
+        const fileName = `orchids_api_accounts_${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.json`;
+
+        const saved = await saveTextFile(content, fileName);
         if (saved) {
           setExportOpen(false);
         }

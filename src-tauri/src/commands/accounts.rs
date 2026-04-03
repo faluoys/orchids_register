@@ -1,10 +1,168 @@
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
 use tauri::State;
 
 use crate::db;
 use crate::orchids_profile;
 use crate::state::AppState;
+
+const ORCHIDS_API_DEFAULT_PROJECT_ID: &str = "280b7bae-cd29-41e4-a0a6-7f603c43b607";
+const ORCHIDS_API_DEFAULT_AGENT_MODE: &str = "claude-opus-4.5";
+
+#[derive(Debug, Serialize)]
+struct OrchidsApiImportAccount {
+    name: String,
+    session_id: String,
+    client_cookie: String,
+    client_uat: String,
+    project_id: String,
+    user_id: String,
+    agent_mode: String,
+    email: String,
+    weight: i32,
+    enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct OrchidsApiImportPayload {
+    version: i32,
+    export_at: String,
+    accounts: Vec<OrchidsApiImportAccount>,
+}
+
+fn normalize_client_cookie(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized = trimmed
+        .trim_matches(|c| matches!(c, '"' | '[' | ']'))
+        .trim()
+        .to_string();
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn filter_accounts_by_ids(
+    accounts: Vec<db::Account>,
+    ids: Option<&[i64]>,
+) -> Vec<db::Account> {
+    let Some(ids) = ids else {
+        return accounts;
+    };
+
+    let id_to_index: HashMap<i64, usize> = ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (*id, index))
+        .collect();
+
+    let mut selected: Vec<(usize, db::Account)> = accounts
+        .into_iter()
+        .filter_map(|account| id_to_index.get(&account.id).copied().map(|index| (index, account)))
+        .collect();
+    selected.sort_by_key(|(index, _)| *index);
+    selected.into_iter().map(|(_, account)| account).collect()
+}
+
+fn build_orchids_api_rows(accounts: &[db::Account]) -> Vec<OrchidsApiImportAccount> {
+    let client_uat = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().to_string())
+        .unwrap_or_else(|_| "0".to_string());
+
+    accounts
+        .iter()
+        .filter_map(|account| {
+            let session_id = account.created_session_id.as_deref()?.trim();
+            let user_id = account.created_user_id.as_deref()?.trim();
+            let client_cookie = normalize_client_cookie(account.client_cookie.as_deref()?)?;
+
+            if session_id.is_empty() || user_id.is_empty() || client_cookie.is_empty() {
+                return None;
+            }
+
+            Some(OrchidsApiImportAccount {
+                name: format!("orchids-{}", account.id),
+                session_id: session_id.to_string(),
+                client_cookie,
+                client_uat: client_uat.clone(),
+                project_id: ORCHIDS_API_DEFAULT_PROJECT_ID.to_string(),
+                user_id: user_id.to_string(),
+                agent_mode: ORCHIDS_API_DEFAULT_AGENT_MODE.to_string(),
+                email: account.email.clone(),
+                weight: 1,
+                enabled: true,
+            })
+        })
+        .collect()
+}
+
+fn render_export_payload(accounts: &[db::Account], format: &str) -> Result<String, String> {
+    match format {
+        "csv" => {
+            let mut wtr = csv::Writer::from_writer(Vec::new());
+            wtr.write_record([
+                "ID",
+                "Email",
+                "Password",
+                "Status",
+                "Group",
+                "Plan",
+                "Credits",
+                "SignUpId",
+                "ClientCookie",
+                "DesktopJWT",
+                "CreatedAt",
+            ])
+            .map_err(|e| e.to_string())?;
+            for account in accounts {
+                let credits = account.credits.map(|v| v.to_string()).unwrap_or_default();
+                wtr.write_record([
+                    &account.id.to_string(),
+                    &account.email,
+                    &account.password,
+                    &account.status,
+                    &account.group_name,
+                    account.plan.as_deref().unwrap_or(""),
+                    &credits,
+                    account.sign_up_id.as_deref().unwrap_or(""),
+                    account.client_cookie.as_deref().unwrap_or(""),
+                    account.desktop_jwt.as_deref().unwrap_or(""),
+                    &account.created_at,
+                ])
+                .map_err(|e| e.to_string())?;
+            }
+            let data = wtr.into_inner().map_err(|e| e.to_string())?;
+            String::from_utf8(data).map_err(|e| e.to_string())
+        }
+        "cookie" => {
+            let rows: Vec<String> = accounts
+                .iter()
+                .filter_map(|account| account.client_cookie.as_deref())
+                .filter_map(normalize_client_cookie)
+                .collect();
+            serde_json::to_string_pretty(&rows).map_err(|e| e.to_string())
+        }
+        "orchids-api" => {
+            let payload = OrchidsApiImportPayload {
+                version: 1,
+                export_at: chrono::Utc::now().to_rfc3339(),
+                accounts: build_orchids_api_rows(accounts),
+            };
+            serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())
+        }
+        _ => serde_json::to_string_pretty(accounts).map_err(|e| e.to_string()),
+    }
+}
 
 #[tauri::command]
 pub async fn get_accounts(
@@ -158,50 +316,13 @@ pub async fn export_accounts(
     state: State<'_, AppState>,
     status: Option<String>,
     format: Option<String>,
+    ids: Option<Vec<i64>>,
 ) -> Result<String, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let accounts = db::get_all_accounts(&conn, status.as_deref(), None).map_err(|e| e.to_string())?;
-
+    let selected = filter_accounts_by_ids(accounts, ids.as_deref());
     let fmt = format.unwrap_or_else(|| "json".to_string());
-    match fmt.as_str() {
-        "csv" => {
-            let mut wtr = csv::Writer::from_writer(Vec::new());
-            wtr.write_record([
-                "ID",
-                "Email",
-                "Password",
-                "Status",
-                "Group",
-                "Plan",
-                "Credits",
-                "SignUpId",
-                "ClientCookie",
-                "DesktopJWT",
-                "CreatedAt",
-            ])
-            .map_err(|e| e.to_string())?;
-            for a in &accounts {
-                let credits = a.credits.map(|v| v.to_string()).unwrap_or_default();
-                wtr.write_record([
-                    &a.id.to_string(),
-                    &a.email,
-                    &a.password,
-                    &a.status,
-                    &a.group_name,
-                    a.plan.as_deref().unwrap_or(""),
-                    &credits,
-                    a.sign_up_id.as_deref().unwrap_or(""),
-                    a.client_cookie.as_deref().unwrap_or(""),
-                    a.desktop_jwt.as_deref().unwrap_or(""),
-                    &a.created_at,
-                ])
-                .map_err(|e| e.to_string())?;
-            }
-            let data = wtr.into_inner().map_err(|e| e.to_string())?;
-            String::from_utf8(data).map_err(|e| e.to_string())
-        }
-        _ => serde_json::to_string_pretty(&accounts).map_err(|e| e.to_string()),
-    }
+    render_export_payload(&selected, &fmt)
 }
 
 #[tauri::command]
@@ -322,7 +443,8 @@ pub async fn save_text_file(
             .dialog()
             .file()
             .set_file_name(&default_name)
-            .add_filter("JSONL", &["jsonl"])
+            .add_filter("JSON", &["json"])
+            .add_filter("Text", &["txt", "jsonl"])
             .add_filter("所有文件", &["*"])
             .blocking_save_file();
 
@@ -339,4 +461,76 @@ pub async fn save_text_file(
     .map_err(|e| e.to_string())?;
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn sample_account() -> db::Account {
+        db::Account {
+            id: 7,
+            email: "demo@example.com".to_string(),
+            password: "Secret123!".to_string(),
+            sign_up_id: Some("sua_123".to_string()),
+            email_code: None,
+            register_complete: true,
+            created_session_id: Some("sess_123".to_string()),
+            created_user_id: Some("user_123".to_string()),
+            client_cookie: Some("\"cookie_123\"".to_string()),
+            desktop_jwt: Some("jwt_123".to_string()),
+            status: "complete".to_string(),
+            error_message: None,
+            batch_id: None,
+            plan: Some("FREE".to_string()),
+            credits: Some(12),
+            created_at: "2026-04-03 16:00:00".to_string(),
+            updated_at: "2026-04-03 16:00:00".to_string(),
+            group_id: 1,
+            group_name: "默认分组".to_string(),
+        }
+    }
+
+    #[test]
+    fn orchids_api_export_uses_expected_shape() {
+        let payload = render_export_payload(&[sample_account()], "orchids-api").unwrap();
+        let value: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value.get("version").and_then(Value::as_i64), Some(1));
+        assert!(value.get("export_at").and_then(Value::as_str).is_some());
+
+        let rows = value.get("accounts").and_then(Value::as_array).unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = rows[0].as_object().unwrap();
+        assert_eq!(row.get("name").and_then(Value::as_str), Some("orchids-7"));
+        assert_eq!(row.get("session_id").and_then(Value::as_str), Some("sess_123"));
+        assert_eq!(row.get("client_cookie").and_then(Value::as_str), Some("cookie_123"));
+        assert_eq!(
+            row.get("project_id").and_then(Value::as_str),
+            Some("280b7bae-cd29-41e4-a0a6-7f603c43b607")
+        );
+        assert_eq!(row.get("user_id").and_then(Value::as_str), Some("user_123"));
+        assert_eq!(row.get("agent_mode").and_then(Value::as_str), Some("claude-opus-4.5"));
+        assert_eq!(row.get("email").and_then(Value::as_str), Some("demo@example.com"));
+        assert_eq!(row.get("weight").and_then(Value::as_i64), Some(1));
+        assert_eq!(row.get("enabled").and_then(Value::as_bool), Some(true));
+        assert!(row.get("client_uat").and_then(Value::as_str).is_some());
+    }
+
+    #[test]
+    fn orchids_api_export_skips_accounts_missing_required_fields() {
+        let mut missing = sample_account();
+        missing.created_session_id = None;
+
+        let payload = render_export_payload(&[missing], "orchids-api").unwrap();
+        let value: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value.get("accounts").and_then(Value::as_array).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn cookie_export_returns_sanitized_cookie_array() {
+        let payload = render_export_payload(&[sample_account()], "cookie").unwrap();
+        let value: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value, serde_json::json!(["cookie_123"]));
+    }
 }

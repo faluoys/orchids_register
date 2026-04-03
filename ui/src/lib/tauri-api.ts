@@ -50,11 +50,13 @@ export async function deleteAccounts(ids: number[]): Promise<number> {
 
 export async function exportAccounts(
   status?: string,
-  format?: string
+  format?: string,
+  ids?: number[]
 ): Promise<string> {
   return invoke("export_accounts", {
     status: status ?? null,
     format: format ?? null,
+    ids: ids ?? null,
   });
 }
 

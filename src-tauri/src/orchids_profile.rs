@@ -1,3 +1,9 @@
+use std::collections::HashSet;
+use std::fmt;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use regex::Regex;
 use serde_json::Value;
 
 use orchids_core::constants::user_agent;
@@ -7,11 +13,18 @@ const CLERK_BASE: &str = "https://clerk.orchids.app";
 const ORCHIDS_WEB: &str = "https://www.orchids.app";
 const API_VERSION: &str = "2025-11-10";
 const JS_VERSION: &str = "5.125.3";
-
-const NEXT_ACTION_GET_USER: &str = "7f7eaa0b21b97b6937fdbab6aa91f1edd3d887506d";
-const NEXT_ACTION_PROFILE_INIT: &str = "7f8dc938d6fb260138805a8ad7d07a4cafc6d04e28";
-const NEXT_ROUTER_STATE_TREE: &str =
-    "%5B%22%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%2Ctrue%5D";
+const DEFAULT_PROFILE_ACTION_ID: &str = "4024929f98f58f3e813cf1e5f42d2e952b1dde0f40";
+const ACTION_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+const DEFAULT_NEXT_ROUTER_STATE_TREE: &str =
+    r#"["",{"children":["__PAGE__",{},null,null]},null,null,true]"#;
+const ACTION_NAME_HINTS: [&str; 6] = [
+    "getUserProfile",
+    "getUserCredits",
+    "getCredits",
+    "getUserUsage",
+    "getUsage",
+    "getUser",
+];
 
 #[derive(Debug, Clone)]
 pub struct ProfileResult {
@@ -19,7 +32,32 @@ pub struct ProfileResult {
     pub credits: Option<i64>,
 }
 
-pub fn fetch_plan_and_credits(email: &str, password: &str, timeout: i64, proxy: Option<&str>) -> Result<ProfileResult, String> {
+#[derive(Debug, Clone)]
+struct ActionCacheEntry {
+    id: String,
+    fetched_at: Instant,
+}
+
+#[derive(Debug)]
+enum ProfileFetchError {
+    ActionNotFound(String),
+    Other(String),
+}
+
+impl fmt::Display for ProfileFetchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ActionNotFound(message) | Self::Other(message) => f.write_str(message),
+        }
+    }
+}
+
+pub fn fetch_plan_and_credits(
+    email: &str,
+    password: &str,
+    timeout: i64,
+    proxy: Option<&str>,
+) -> Result<ProfileResult, String> {
     let (client, _) = create_client(proxy).map_err(|e| e.to_string())?;
 
     init_environment(&client, timeout)?;
@@ -30,23 +68,9 @@ pub fn fetch_plan_and_credits(email: &str, password: &str, timeout: i64, proxy: 
     let touch_data = touch_session(&client, &session_id, timeout)?;
     let user_id = extract_user_id_from_touch(&touch_data)
         .ok_or_else(|| "touch 成功但未获取到 user_id".to_string())?;
-    let deployment_id = get_home_deployment_id(&client, timeout);
+    let session_jwt = fetch_session_jwt(&client, &session_id, timeout)?;
 
-    // 实测部分账号首次直接拉取会 500，需要先初始化 profile 状态再重试
-    if let Ok(profile) = fetch_profile(&client, &user_id, timeout, deployment_id.as_deref()) {
-        return Ok(profile);
-    }
-
-    init_profile_state(&client, timeout, deployment_id.as_deref())?;
-    std::thread::sleep(std::time::Duration::from_millis(800));
-    if let Ok(profile) = fetch_profile(&client, &user_id, timeout, deployment_id.as_deref()) {
-        return Ok(profile);
-    }
-
-    // 再补一次初始化+重试，兼容后端状态传播慢的场景
-    init_profile_state(&client, timeout, deployment_id.as_deref())?;
-    std::thread::sleep(std::time::Duration::from_millis(1000));
-    fetch_profile(&client, &user_id, timeout, deployment_id.as_deref())
+    fetch_profile(&client, &session_jwt, &user_id, timeout)
 }
 
 fn clerk_params() -> [(&'static str, &'static str); 2] {
@@ -158,46 +182,79 @@ fn touch_session(
     Ok(data)
 }
 
-fn init_profile_state(
+fn fetch_session_jwt(
     client: &reqwest::blocking::Client,
+    session_id: &str,
     timeout: i64,
-    deployment_id: Option<&str>,
-) -> Result<(), String> {
-    let mut req = client
-        .post(format!("{ORCHIDS_WEB}/"))
-        .header("accept", "text/x-component")
-        .header("content-type", "text/plain;charset=UTF-8")
+) -> Result<String, String> {
+    let url = format!("{CLERK_BASE}/v1/client/sessions/{session_id}/tokens");
+    let resp = client
+        .post(url)
+        .query(&[
+            ("__clerk_api_version", API_VERSION),
+            ("_clerk_js_version", JS_VERSION),
+            ("debug", "skip_cache"),
+        ])
+        .header("accept", "*/*")
+        .header("content-type", "application/x-www-form-urlencoded")
         .header("origin", ORCHIDS_WEB)
         .header("referer", format!("{ORCHIDS_WEB}/"))
         .header("user-agent", user_agent())
-        .header("next-action", NEXT_ACTION_PROFILE_INIT)
-        .header("next-router-state-tree", NEXT_ROUTER_STATE_TREE)
-        .header("sec-fetch-site", "same-origin")
-        .header("sec-fetch-mode", "cors")
-        .header("sec-fetch-dest", "empty")
         .header("accept-language", "zh-CN,zh;q=0.9")
-        .body("[\"$undefined\",\"$undefined\"]")
-        .timeout(req_timeout_secs(timeout));
-    if let Some(did) = deployment_id {
-        req = req.header("x-deployment-id", did);
-    }
-    let resp = req.send().map_err(|e| e.to_string())?;
+        .form(&[("organization_id", "")])
+        .timeout(req_timeout_secs(timeout))
+        .send()
+        .map_err(|e| e.to_string())?;
 
     let status = resp.status().as_u16();
+    let data = json_or_raw(resp);
     if status >= 400 {
-        let body = resp.text().unwrap_or_default();
-        return Err(format!("初始化 profile state 失败: HTTP {} -> {}", status, body));
+        return Err(format!("获取 session jwt 失败: HTTP {} -> {}", status, data));
     }
-    Ok(())
+
+    find_first_jwt(&data).ok_or_else(|| format!("tokens 响应里未找到 jwt: {}", data))
 }
 
 fn fetch_profile(
     client: &reqwest::blocking::Client,
+    session_jwt: &str,
     user_id: &str,
     timeout: i64,
-    deployment_id: Option<&str>,
 ) -> Result<ProfileResult, String> {
-    let body = format!("[\"{}\"]", user_id);
+    let mut action_id = resolve_profile_action_id(client, timeout);
+
+    let mut last_err = match fetch_profile_with_action(client, session_jwt, user_id, &action_id, timeout, false) {
+        Ok(profile) => return Ok(profile),
+        Err(ProfileFetchError::ActionNotFound(_)) => {
+            invalidate_profile_action_cache();
+            action_id = resolve_profile_action_id(client, timeout);
+            match fetch_profile_with_action(client, session_jwt, user_id, &action_id, timeout, false) {
+                Ok(profile) => return Ok(profile),
+                Err(err) => err,
+            }
+        }
+        Err(err) => err,
+    };
+
+    if profile_error_needs_context_retry(&last_err) {
+        match fetch_profile_with_action(client, session_jwt, user_id, &action_id, timeout, true) {
+            Ok(profile) => return Ok(profile),
+            Err(err) => last_err = err,
+        }
+    }
+
+    Err(last_err.to_string())
+}
+
+fn fetch_profile_with_action(
+    client: &reqwest::blocking::Client,
+    session_jwt: &str,
+    user_id: &str,
+    action_id: &str,
+    timeout: i64,
+    include_context: bool,
+) -> Result<ProfileResult, ProfileFetchError> {
+    let body = format!(r#"["{}"]"#, user_id);
     let mut req = client
         .post(format!("{ORCHIDS_WEB}/"))
         .header("accept", "text/x-component")
@@ -205,62 +262,425 @@ fn fetch_profile(
         .header("origin", ORCHIDS_WEB)
         .header("referer", format!("{ORCHIDS_WEB}/"))
         .header("user-agent", user_agent())
-        .header("next-action", NEXT_ACTION_GET_USER)
-        .header("next-router-state-tree", NEXT_ROUTER_STATE_TREE)
+        .header("next-action", action_id)
+        .header("accept-language", "zh-CN,zh;q=0.9")
         .header("sec-fetch-site", "same-origin")
         .header("sec-fetch-mode", "cors")
         .header("sec-fetch-dest", "empty")
-        .header("accept-language", "zh-CN,zh;q=0.9")
-        .body(body)
-        .timeout(req_timeout_secs(timeout));
-    if let Some(did) = deployment_id {
-        req = req.header("x-deployment-id", did);
-    }
+        .header("cookie", format!("__session={session_jwt}"))
+        .body(body);
 
-    let resp = req.send().map_err(|e| e.to_string())?;
+    if include_context {
+        let state_tree = fetch_next_router_state_tree(client, timeout)
+            .unwrap_or_else(|| DEFAULT_NEXT_ROUTER_STATE_TREE.to_string());
+        req = req.header("next-router-state-tree", state_tree);
 
-    let status = resp.status().as_u16();
-    let raw = resp.text().unwrap_or_default();
-    if status >= 400 {
-        return Err(format!("获取 profile 失败: HTTP {} -> {}", status, raw));
-    }
-
-    let objs = extract_json_objects_from_rsc_text(&raw);
-    for obj in objs {
-        let plan = obj.get("plan").and_then(Value::as_str).map(str::to_string);
-        let credits = obj.get("credits").and_then(Value::as_i64);
-        let user = obj.get("userId").and_then(Value::as_str);
-        if user.is_some() && (plan.is_some() || credits.is_some()) {
-            return Ok(ProfileResult { plan, credits });
+        if let Some(deployment_id) = get_home_deployment_id(client, timeout) {
+            req = req.header("x-deployment-id", deployment_id);
         }
     }
 
-    Err(format!("响应中未找到 profile/credits 字段: {}", raw))
+    let resp = req
+        .timeout(req_timeout_secs(timeout))
+        .send()
+        .map_err(|e| ProfileFetchError::Other(e.to_string()))?;
+
+    let status = resp.status().as_u16();
+    let action_not_found = resp
+        .headers()
+        .get("x-nextjs-action-not-found")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    let raw = resp.text().unwrap_or_default();
+
+    if status >= 400 {
+        let message = format!("获取 profile 失败: HTTP {} -> {}", status, raw);
+        if action_not_found || raw.to_ascii_lowercase().contains("server action not found") {
+            return Err(ProfileFetchError::ActionNotFound(message));
+        }
+        return Err(ProfileFetchError::Other(message));
+    }
+
+    parse_profile_from_rsc_text(&raw)
+        .ok_or_else(|| ProfileFetchError::Other(format!("响应中未找到 profile/credits 字段: {}", raw)))
+}
+
+fn profile_error_needs_context_retry(err: &ProfileFetchError) -> bool {
+    match err {
+        ProfileFetchError::ActionNotFound(_) => true,
+        ProfileFetchError::Other(message) => {
+            profile_response_needs_context_retry(0, message)
+                || message.contains("响应中未找到 profile/credits 字段")
+        }
+    }
+}
+
+fn resolve_profile_action_id(client: &reqwest::blocking::Client, timeout: i64) -> String {
+    if let Ok(cache) = profile_action_cache().lock() {
+        if let Some(entry) = cache.as_ref() {
+            if entry.fetched_at.elapsed() < ACTION_CACHE_TTL {
+                return entry.id.clone();
+            }
+        }
+    }
+
+    let action_id = discover_profile_action_id(client, timeout)
+        .unwrap_or_else(|_| DEFAULT_PROFILE_ACTION_ID.to_string());
+
+    if let Ok(mut cache) = profile_action_cache().lock() {
+        *cache = Some(ActionCacheEntry {
+            id: action_id.clone(),
+            fetched_at: Instant::now(),
+        });
+    }
+
+    action_id
+}
+
+fn invalidate_profile_action_cache() {
+    if let Ok(mut cache) = profile_action_cache().lock() {
+        *cache = None;
+    }
+}
+
+fn profile_action_cache() -> &'static Mutex<Option<ActionCacheEntry>> {
+    static CACHE: OnceLock<Mutex<Option<ActionCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn discover_profile_action_id(
+    client: &reqwest::blocking::Client,
+    timeout: i64,
+) -> Result<String, String> {
+    let html = fetch_text(client, ORCHIDS_WEB, timeout)?;
+    let script_urls = extract_script_urls_from_html(&html);
+    if script_urls.is_empty() {
+        return Err("首页未找到 Orchids JS chunk".to_string());
+    }
+
+    let mut fuzzy_match = None;
+    for url in script_urls {
+        if !url.contains("/_next/static/chunks/") {
+            continue;
+        }
+
+        let js = match fetch_text(client, &url, timeout) {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
+
+        for (id, name) in extract_server_actions_from_js(&js) {
+            if ACTION_NAME_HINTS.iter().any(|hint| *hint == name) {
+                return Ok(id);
+            }
+
+            let lower = name.to_ascii_lowercase();
+            if fuzzy_match.is_none()
+                && (lower.contains("profile")
+                    || lower.contains("credit")
+                    || lower.contains("usage")
+                    || lower.contains("quota"))
+            {
+                fuzzy_match = Some(id);
+            }
+        }
+    }
+
+    fuzzy_match.ok_or_else(|| "未发现 Orchids profile action".to_string())
+}
+
+fn fetch_text(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    timeout: i64,
+) -> Result<String, String> {
+    let resp = client
+        .get(url)
+        .header("accept", "*/*")
+        .header("referer", format!("{ORCHIDS_WEB}/"))
+        .header("user-agent", user_agent())
+        .timeout(req_timeout_secs(timeout))
+        .send()
+        .map_err(|e| e.to_string())?;
+
+    let status = resp.status().as_u16();
+    if status >= 400 {
+        let body = resp.text().unwrap_or_default();
+        return Err(format!("抓取 {} 失败: HTTP {} -> {}", url, status, body));
+    }
+
+    resp.text().map_err(|e| e.to_string())
+}
+
+fn fetch_next_router_state_tree(
+    client: &reqwest::blocking::Client,
+    timeout: i64,
+) -> Option<String> {
+    let resp = client
+        .get(ORCHIDS_WEB)
+        .header("rsc", "1")
+        .header("next-router-prefetch", "1")
+        .header("origin", ORCHIDS_WEB)
+        .header("referer", format!("{ORCHIDS_WEB}/"))
+        .header("user-agent", user_agent())
+        .timeout(req_timeout_secs(timeout))
+        .send()
+        .ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let payload = resp.text().ok()?;
+    extract_router_state_tree_from_rsc_prefetch_payload(&payload)
+}
+
+fn extract_router_state_tree_from_rsc_prefetch_payload(payload: &str) -> Option<String> {
+    let first_line = payload
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let json_part = first_line
+        .split_once(':')
+        .map(|(_, rest)| rest.trim())
+        .unwrap_or(first_line);
+    let value: Value = serde_json::from_str(json_part).ok()?;
+    let tree = find_router_state_tree_value(&value)?;
+    serde_json::to_string(tree).ok()
+}
+
+fn find_router_state_tree_value(value: &Value) -> Option<&Value> {
+    match value {
+        Value::Array(items) => {
+            let looks_like_tree = items.len() >= 5
+                && items.first().map(Value::is_string).unwrap_or(false)
+                && items
+                    .get(1)
+                    .and_then(Value::as_object)
+                    .map(|object| object.contains_key("children"))
+                    .unwrap_or(false);
+
+            if looks_like_tree {
+                return Some(value);
+            }
+
+            for item in items {
+                if let Some(found) = find_router_state_tree_value(item) {
+                    return Some(found);
+                }
+            }
+
+            None
+        }
+        Value::Object(map) => {
+            for item in map.values() {
+                if let Some(found) = find_router_state_tree_value(item) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 fn get_home_deployment_id(client: &reqwest::blocking::Client, timeout: i64) -> Option<String> {
     let resp = client
-        .get(format!("{ORCHIDS_WEB}/"))
+        .get(ORCHIDS_WEB)
         .header("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-        .header("user-agent", user_agent())
         .header("referer", format!("{ORCHIDS_WEB}/"))
+        .header("user-agent", user_agent())
         .timeout(req_timeout_secs(timeout))
         .send()
         .ok()?;
+
     if !resp.status().is_success() {
         return None;
     }
-    resp.headers()
+
+    if let Some(value) = resp
+        .headers()
         .get("x-deployment-id")
-        .and_then(|v| v.to_str().ok())
+        .and_then(|value| value.to_str().ok())
         .map(str::to_string)
+    {
+        return Some(value);
+    }
+
+    let body = resp.text().ok()?;
+    Regex::new(r#"dpl_[A-Za-z0-9]+"#)
+        .ok()?
+        .find(&body)
+        .map(|capture| capture.as_str().to_string())
+}
+
+fn profile_response_needs_context_retry(status: u16, raw: &str) -> bool {
+    if status >= 500 {
+        return true;
+    }
+
+    let lower = raw.to_ascii_lowercase();
+    lower.contains(r#""digest":"#) || lower.contains("\n1:e{")
+}
+
+fn extract_script_urls_from_html(html: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut seen = HashSet::new();
+
+    for caps in script_src_regex().captures_iter(html) {
+        let Some(src) = caps.get(1).map(|capture| capture.as_str().trim()) else {
+            continue;
+        };
+        if src.is_empty() {
+            continue;
+        }
+
+        let absolute = if src.starts_with("http://") || src.starts_with("https://") {
+            src.to_string()
+        } else if src.starts_with('/') {
+            format!("{ORCHIDS_WEB}{src}")
+        } else {
+            format!("{ORCHIDS_WEB}/{}", src.trim_start_matches("./"))
+        };
+
+        if seen.insert(absolute.clone()) {
+            urls.push(absolute);
+        }
+    }
+
+    urls
+}
+
+fn extract_server_actions_from_js(js: &str) -> Vec<(String, String)> {
+    let mut actions = Vec::new();
+    let mut seen = HashSet::new();
+
+    for caps in action_ref_regex().captures_iter(js) {
+        let Some(id) = caps.get(1).map(|capture| capture.as_str().trim()) else {
+            continue;
+        };
+        let Some(name) = caps.get(2).map(|capture| capture.as_str().trim()) else {
+            continue;
+        };
+        if id.is_empty() || name.is_empty() {
+            continue;
+        }
+
+        let item = (id.to_string(), name.to_string());
+        if seen.insert(item.clone()) {
+            actions.push(item);
+        }
+    }
+
+    actions
+}
+
+fn script_src_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| Regex::new(r#"src=["']([^"']+\.js[^"']*)["']"#).unwrap())
+}
+
+fn action_ref_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r#"createServerReference\)\(\s*"([0-9a-f]{40,})"[\s\S]*?"([^"]+)"\s*\)"#)
+            .unwrap()
+    })
+}
+
+fn parse_profile_from_rsc_text(payload: &str) -> Option<ProfileResult> {
+    for obj in extract_json_objects_from_rsc_text(payload) {
+        if let Some(profile) = find_profile_result_in_value(&obj) {
+            return Some(profile);
+        }
+    }
+    None
+}
+
+fn find_profile_result_in_value(value: &Value) -> Option<ProfileResult> {
+    match value {
+        Value::Object(map) => {
+            let plan = map
+                .get("plan")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let credits = map.get("credits").and_then(value_to_i64);
+            let has_user_id = map
+                .get("userId")
+                .and_then(Value::as_str)
+                .or_else(|| map.get("user_id").and_then(Value::as_str))
+                .is_some();
+            let looks_like_profile = (plan.is_some() || credits.is_some())
+                && (has_user_id || (plan.is_some() && credits.is_some()));
+
+            if looks_like_profile {
+                return Some(ProfileResult { plan, credits });
+            }
+
+            for child in map.values() {
+                if let Some(profile) = find_profile_result_in_value(child) {
+                    return Some(profile);
+                }
+            }
+
+            None
+        }
+        Value::Array(items) => {
+            for item in items {
+                if let Some(profile) = find_profile_result_in_value(item) {
+                    return Some(profile);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn value_to_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|current| i64::try_from(current).ok()))
+}
+
+fn find_first_jwt(payload: &Value) -> Option<String> {
+    match payload {
+        Value::Object(map) => {
+            if let Some(jwt) = map
+                .get("jwt")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+            {
+                return Some(jwt.to_string());
+            }
+
+            for value in map.values() {
+                if let Some(found) = find_first_jwt(value) {
+                    return Some(found);
+                }
+            }
+
+            None
+        }
+        Value::Array(items) => {
+            for item in items {
+                if let Some(found) = find_first_jwt(item) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 fn extract_created_session_id(payload: &Value) -> Option<String> {
     payload
         .get("response")
         .and_then(Value::as_object)
-        .and_then(|o| o.get("created_session_id"))
+        .and_then(|object| object.get("created_session_id"))
         .and_then(Value::as_str)
         .map(str::to_string)
 }
@@ -269,49 +689,136 @@ fn extract_user_id_from_touch(payload: &Value) -> Option<String> {
     payload
         .get("response")
         .and_then(Value::as_object)
-        .and_then(|o| o.get("user"))
+        .and_then(|object| object.get("user"))
         .and_then(Value::as_object)
-        .and_then(|o| o.get("id"))
+        .and_then(|object| object.get("id"))
         .and_then(Value::as_str)
         .map(str::to_string)
 }
 
 fn extract_json_objects_from_rsc_text(payload: &str) -> Vec<Value> {
     let mut objs = Vec::new();
-    for line in payload.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+    let mut start = None;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, ch) in payload.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
             continue;
         }
 
-        let candidate = if trimmed
-            .chars()
-            .next()
-            .map(|c| c.is_ascii_digit())
-            .unwrap_or(false)
-        {
-            trimmed
-                .split_once(':')
-                .map(|(_, rest)| rest.trim())
-                .unwrap_or(trimmed)
-        } else {
-            trimmed
-        };
+        match ch {
+            '"' => in_string = true,
+            '{' => {
+                if depth == 0 {
+                    start = Some(index);
+                }
+                depth += 1;
+            }
+            '}' => {
+                if depth == 0 {
+                    continue;
+                }
 
-        if !candidate.starts_with('{') {
-            continue;
-        }
-
-        if let Ok(v) = serde_json::from_str::<Value>(candidate) {
-            objs.push(v);
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(begin) = start.take() {
+                        let end = index + ch.len_utf8();
+                        if let Ok(value) = serde_json::from_str::<Value>(&payload[begin..end]) {
+                            objs.push(value);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
+
     objs
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_json_objects_from_rsc_text_supports_embedded_object_in_array_line() {
+        let payload =
+            r#"1:["$","$L3",null,{"credits":12345,"plan":"PRO","userId":"user_123"}]"#;
+
+        let objs = extract_json_objects_from_rsc_text(payload);
+
+        assert_eq!(objs.len(), 1, "未提取到嵌入数组里的 profile 对象");
+        assert_eq!(objs[0].get("plan").and_then(Value::as_str), Some("PRO"));
+        assert_eq!(objs[0].get("credits").and_then(Value::as_i64), Some(12345));
+    }
+
+    #[test]
+    fn extract_script_urls_from_html_makes_absolute_and_unique() {
+        let html = r#"
+            <script src="/_next/static/chunks/a.js?dpl=test"></script>
+            <script src="https://www.orchids.app/_next/static/chunks/b.js"></script>
+            <script src="/_next/static/chunks/a.js?dpl=test"></script>
+        "#;
+
+        let urls = extract_script_urls_from_html(html);
+
+        assert_eq!(
+            urls,
+            vec![
+                "https://www.orchids.app/_next/static/chunks/a.js?dpl=test".to_string(),
+                "https://www.orchids.app/_next/static/chunks/b.js".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_server_actions_from_js_reads_create_server_reference_calls() {
+        let js = r#"
+            let a=(0,n.createServerReference)(
+                "4024929f98f58f3e813cf1e5f42d2e952b1dde0f40",
+                n.callServer,
+                void 0,
+                n.findSourceMapURL,
+                "getUserProfile"
+            );
+        "#;
+
+        let actions = extract_server_actions_from_js(js);
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].0, "4024929f98f58f3e813cf1e5f42d2e952b1dde0f40");
+        assert_eq!(actions[0].1, "getUserProfile");
+    }
+
+    #[test]
+    fn profile_response_needs_context_retry_on_digest_500() {
+        let raw = r#"0:{"a":"$@1","f":"","b":"CGcit38jVgcutHMlYO4Mb","q":"","i":false}
+1:E{"digest":"1288858246"}"#;
+
+        assert!(profile_response_needs_context_retry(500, raw));
+    }
+
+    #[test]
+    fn extract_router_state_tree_from_rsc_prefetch_payload_reads_first_tree() {
+        let raw = r#"0:{"f":[[[["",{"children":["__PAGE__",{},null,null]},null,null,true],null,null,true]]]}"#;
+
+        let tree = extract_router_state_tree_from_rsc_prefetch_payload(raw)
+            .expect("应当能提取 router state tree");
+
+        assert_eq!(tree, r#"["",{"children":["__PAGE__",{},null,null]},null,null,true]"#);
+    }
 
     #[test]
     fn live_fetch_plan_and_credits_from_env() {
@@ -330,8 +837,8 @@ mod tests {
             }
         };
 
-        let result = fetch_plan_and_credits(&email, &password, 30, None)
-            .unwrap_or_else(|e| panic!("live fetch failed: {}", e));
+        let result =
+            fetch_plan_and_credits(&email, &password, 30, None).unwrap_or_else(|e| panic!("live fetch failed: {}", e));
 
         eprintln!(
             "live fetch ok: email={}, plan={:?}, credits={:?}",
