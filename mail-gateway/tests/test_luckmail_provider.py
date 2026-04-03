@@ -1,249 +1,280 @@
-import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
-import httpx
-
+import mail_gateway.providers.luckmail as luckmail_module
 from mail_gateway.providers.luckmail import LuckMailProvider
 
 
-def test_luckmail_provider_acquires_purchased_inbox() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.method == "POST"
-        assert request.url.path == "/api/v1/openapi/email/purchases/api-get"
-        assert request.headers["X-API-Key"] == "AC-test-key"
-        payload = json.loads(request.content.decode("utf-8"))
-        assert payload["count"] == 1
-        assert payload["tag_name"] == "orchids-ready"
-        assert payload["mark_tag_name"] == "orchids-used"
-        return httpx.Response(
-            200,
-            json={
-                "code": 0,
-                "message": "success",
-                "data": [
-                    {
-                        "id": 1,
-                        "email_address": "user1@outlook.com",
-                        "token": "tok_abc123",
-                        "project_name": "Orchids",
-                        "tag_id": 2,
-                        "tag_name": "orchids-used",
-                    }
-                ],
-            },
-        )
+class FakeLuckMailClient:
+    def __init__(self, user) -> None:
+        self.user = user
 
-    provider = LuckMailProvider(
-        base_url="https://mails.luckyous.com",
-        api_key="AC-test-key",
-        client=httpx.Client(
-            transport=httpx.MockTransport(handler),
-            base_url="https://mails.luckyous.com",
-        ),
+
+def _make_provider(monkeypatch, user) -> LuckMailProvider:
+    monkeypatch.setattr(
+        luckmail_module,
+        'create_luckmail_client',
+        lambda base_url, api_key: FakeLuckMailClient(user),
     )
+    return LuckMailProvider(base_url='https://mails.luckyous.com', api_key='AC-test-key')
+
+
+def test_luckmail_provider_acquires_purchased_inbox_via_sdk(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeUser:
+        def api_get_purchases(self, count: int, tag_name: str | None = None, mark_tag_name: str | None = None):
+            calls.append(
+                {
+                    'count': count,
+                    'tag_name': tag_name,
+                    'mark_tag_name': mark_tag_name,
+                }
+            )
+            return [
+                SimpleNamespace(
+                    id=1,
+                    email_address='user1@outlook.com',
+                    token='tok_abc123',
+                )
+            ]
+
+    provider = _make_provider(monkeypatch, FakeUser())
 
     session = provider.acquire_inbox(
-        project_code="orchids",
-        metadata={"tag_name": "orchids-ready", "mark_tag_name": "orchids-used"},
+        project_code='orchids',
+        domain=None,
+        metadata={'tag_name': 'orchids-ready', 'mark_tag_name': 'orchids-used'},
     )
 
-    assert session.address == "user1@outlook.com"
-    assert session.upstream_token == "tok_abc123"
-    assert session.upstream_ref == "purchase:1"
+    assert calls == [
+        {
+            'count': 1,
+            'tag_name': 'orchids-ready',
+            'mark_tag_name': 'orchids-used',
+        }
+    ]
+    assert session.address == 'user1@outlook.com'
+    assert session.upstream_token == 'tok_abc123'
+    assert session.upstream_ref == 'purchase:1'
 
 
-def test_luckmail_provider_poll_code_falls_back_to_regex_extraction() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.method == "GET"
-        assert request.url.path == "/api/v1/openapi/email/token/tok_fallback/code"
-        return httpx.Response(
-            200,
-            json={
-                "code": 0,
-                "message": "success",
-                "data": {
-                    "has_new_mail": True,
-                    "verification_code": None,
-                    "mail": {
-                        "message_id": "msg-001",
-                        "received_at": "2026-04-02T10:00:00Z",
-                        "from": "noreply@orchids.com",
-                        "subject": "Your Orchids verification code is 654321",
-                        "body_text": "",
-                        "body_html": "",
+def test_luckmail_provider_acquires_domain_filtered_inbox_and_marks_only_selected(monkeypatch) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class FakeUser:
+        def api_get_purchases(self, count: int, tag_name: str | None = None, mark_tag_name: str | None = None):
+            calls.append(
+                (
+                    'api_get_purchases',
+                    {
+                        'count': count,
+                        'tag_name': tag_name,
+                        'mark_tag_name': mark_tag_name,
                     },
-                },
-            },
-        )
+                )
+            )
+            return [
+                SimpleNamespace(
+                    id=1,
+                    email_address='user1@outlook.com',
+                    token='tok_outlook',
+                ),
+                SimpleNamespace(
+                    id=2,
+                    email_address='user2@hotmail.com',
+                    token='tok_hotmail',
+                ),
+            ]
 
-    provider = LuckMailProvider(
-        base_url="https://mails.luckyous.com",
-        api_key="AC-test-key",
-        client=httpx.Client(
-            transport=httpx.MockTransport(handler),
-            base_url="https://mails.luckyous.com",
-        ),
+        def set_purchase_tag(self, purchase_id: int, tag_name: str | None = None):
+            calls.append(
+                (
+                    'set_purchase_tag',
+                    {
+                        'purchase_id': purchase_id,
+                        'tag_name': tag_name,
+                    },
+                )
+            )
+
+    provider = _make_provider(monkeypatch, FakeUser())
+
+    session = provider.acquire_inbox(
+        project_code='orchids',
+        domain='@Hotmail.com',
+        metadata={'tag_name': 'orchids-ready', 'mark_tag_name': 'orchids-used'},
     )
+
+    assert calls == [
+        (
+            'api_get_purchases',
+            {
+                'count': 100,
+                'tag_name': 'orchids-ready',
+                'mark_tag_name': None,
+            },
+        ),
+        (
+            'set_purchase_tag',
+            {
+                'purchase_id': 2,
+                'tag_name': 'orchids-used',
+            },
+        ),
+    ]
+    assert session.address == 'user2@hotmail.com'
+    assert session.upstream_token == 'tok_hotmail'
+    assert session.upstream_ref == 'purchase:2'
+
+
+def test_luckmail_provider_poll_code_uses_sdk_detail_fallback(monkeypatch) -> None:
+    monkeypatch.setattr(luckmail_module.time, 'sleep', lambda _: None)
+
+    class FakeUser:
+        def __init__(self) -> None:
+            self.detail_calls: list[tuple[str, str]] = []
+
+        def get_token_code(self, token: str):
+            assert token == 'tok_fallback'
+            return SimpleNamespace(
+                has_new_mail=True,
+                verification_code=None,
+                mail={
+                    'message_id': 'msg-001',
+                    'received_at': '2026-04-02T10:00:00Z',
+                    'from': 'noreply@orchids.com',
+                    'subject': 'Orchids verification',
+                },
+            )
+
+        def get_token_mail_detail(self, token: str, message_id: str):
+            self.detail_calls.append((token, message_id))
+            return SimpleNamespace(
+                message_id='msg-001',
+                from_addr='noreply@orchids.com',
+                subject='Your Orchids verification',
+                body_text='Your verification code is 654321',
+                body_html='',
+                received_at='2026-04-02T10:00:00Z',
+                verification_code='',
+            )
+
+    user = FakeUser()
+    provider = _make_provider(monkeypatch, user)
 
     result = provider.poll_code(
-        upstream_token="tok_fallback",
+        upstream_token='tok_fallback',
         timeout_seconds=2,
         interval_seconds=0.1,
-        code_pattern=r"(\d{6})",
+        code_pattern=r'(\d{6})',
         after_ts=None,
     )
 
-    assert result.status == "success"
-    assert result.code == "654321"
-    assert result.message_id == "msg-001"
-    assert result.received_at == "2026-04-02T10:00:00Z"
-    assert result.summary["from"] == "noreply@orchids.com"
+    assert user.detail_calls == [('tok_fallback', 'msg-001')]
+    assert result.status == 'success'
+    assert result.code == '654321'
+    assert result.message_id == 'msg-001'
+    assert result.received_at == '2026-04-02T10:00:00Z'
+    assert result.summary['from'] == 'noreply@orchids.com'
 
 
-def test_luckmail_provider_poll_code_with_after_ts_ignores_old_mail() -> None:
-    calls = {"count": 0}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls["count"] += 1
-        assert request.method == "GET"
-        assert request.url.path == "/api/v1/openapi/email/token/tok_after_ts/code"
-        if calls["count"] == 1:
-            return httpx.Response(
-                200,
-                json={
-                    "code": 0,
-                    "message": "success",
-                    "data": {
-                        "has_new_mail": True,
-                        "verification_code": "111111",
-                        "mail": {
-                            "message_id": "msg-old",
-                            "received_at": "2026-04-02T10:00:00Z",
-                            "from": "noreply@orchids.com",
-                            "subject": "Old code",
-                            "body_text": "",
-                            "body_html": "",
-                        },
-                    },
-                },
-            )
-        return httpx.Response(
-            200,
-            json={
-                "code": 0,
-                "message": "success",
-                "data": {
-                    "has_new_mail": True,
-                    "verification_code": "222222",
-                    "mail": {
-                        "message_id": "msg-new",
-                        "received_at": "2026-04-02T10:10:00Z",
-                        "from": "noreply@orchids.com",
-                        "subject": "New code",
-                        "body_text": "",
-                        "body_html": "",
-                    },
-                },
-            },
-        )
-
-    provider = LuckMailProvider(
-        base_url="https://mails.luckyous.com",
-        api_key="AC-test-key",
-        client=httpx.Client(
-            transport=httpx.MockTransport(handler),
-            base_url="https://mails.luckyous.com",
-        ),
-    )
+def test_luckmail_provider_poll_code_ignores_old_mail_before_after_ts(monkeypatch) -> None:
+    monkeypatch.setattr(luckmail_module.time, 'sleep', lambda _: None)
     after_ts = int(datetime(2026, 4, 2, 10, 5, 0, tzinfo=timezone.utc).timestamp() * 1000)
 
+    class FakeUser:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_token_code(self, token: str):
+            self.calls += 1
+            if self.calls == 1:
+                return SimpleNamespace(
+                    has_new_mail=True,
+                    verification_code=None,
+                    mail={
+                        'message_id': 'msg-old',
+                        'received_at': '2026-04-02T10:00:00Z',
+                        'from': 'noreply@orchids.com',
+                        'subject': 'Old code',
+                    },
+                )
+            return SimpleNamespace(
+                has_new_mail=True,
+                verification_code='222222',
+                mail={
+                    'message_id': 'msg-new',
+                    'received_at': '2026-04-02T10:10:00Z',
+                    'from': 'noreply@orchids.com',
+                    'subject': 'New code',
+                },
+            )
+
+        def get_token_mail_detail(self, token: str, message_id: str):
+            return SimpleNamespace(
+                message_id=message_id,
+                from_addr='noreply@orchids.com',
+                subject='Detail',
+                body_text='111111',
+                body_html='',
+                received_at='2026-04-02T10:00:00Z',
+                verification_code='',
+            )
+
+    user = FakeUser()
+    provider = _make_provider(monkeypatch, user)
+
     result = provider.poll_code(
-        upstream_token="tok_after_ts",
+        upstream_token='tok_after_ts',
         timeout_seconds=2,
         interval_seconds=0.1,
-        code_pattern=r"(\d{6})",
+        code_pattern=r'(\d{6})',
         after_ts=after_ts,
     )
 
-    assert calls["count"] >= 2
-    assert result.status == "success"
-    assert result.code == "222222"
-    assert result.message_id == "msg-new"
+    assert user.calls >= 2
+    assert result.status == 'success'
+    assert result.code == '222222'
+    assert result.message_id == 'msg-new'
 
 
-def test_luckmail_provider_acquire_inbox_raises_runtime_error_for_malformed_success_payload() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.method == "POST"
-        assert request.url.path == "/api/v1/openapi/email/purchases/api-get"
-        return httpx.Response(
-            200,
-            json={
-                "code": 0,
-                "message": "success",
-                "data": [
-                    {
-                        "id": 1,
-                        "email_address": "user1@outlook.com",
-                    }
-                ],
-            },
-        )
+def test_luckmail_provider_acquire_inbox_raises_runtime_error_for_invalid_sdk_values(monkeypatch) -> None:
+    class FakeUser:
+        def api_get_purchases(self, count: int, tag_name: str | None = None, mark_tag_name: str | None = None):
+            return [SimpleNamespace(id=None, email_address='user1@outlook.com', token='tok_abc123')]
 
-    provider = LuckMailProvider(
-        base_url="https://mails.luckyous.com",
-        api_key="AC-test-key",
-        client=httpx.Client(
-            transport=httpx.MockTransport(handler),
-            base_url="https://mails.luckyous.com",
-        ),
-    )
+    provider = _make_provider(monkeypatch, FakeUser())
 
     try:
         provider.acquire_inbox(
-            project_code="orchids",
-            metadata={"tag_name": "orchids-ready", "mark_tag_name": "orchids-used"},
+            project_code='orchids',
+            domain=None,
+            metadata={'tag_name': 'orchids-ready', 'mark_tag_name': 'orchids-used'},
         )
     except RuntimeError as exc:
-        assert "LuckMail acquire failed" in str(exc)
+        assert 'LuckMail acquire failed' in str(exc)
     else:
-        raise AssertionError("expected RuntimeError for malformed success payload")
+        raise AssertionError('expected RuntimeError for invalid SDK success values')
 
 
-def test_luckmail_provider_acquire_inbox_raises_runtime_error_for_invalid_values() -> None:
-    invalid_records = [
-        {"id": 1, "email_address": "", "token": "tok_abc123"},
-        {"id": 1, "email_address": "user1@outlook.com", "token": ""},
-        {"id": None, "email_address": "user1@outlook.com", "token": "tok_abc123"},
-    ]
+def test_luckmail_provider_acquire_inbox_raises_when_domain_has_no_match(monkeypatch) -> None:
+    class FakeUser:
+        def api_get_purchases(self, count: int, tag_name: str | None = None, mark_tag_name: str | None = None):
+            return [
+                SimpleNamespace(id=1, email_address='user1@outlook.com', token='tok_abc123'),
+                SimpleNamespace(id=2, email_address='user2@gmail.com', token='tok_def456'),
+            ]
 
-    for record in invalid_records:
-        def handler(request: httpx.Request, rec: dict[str, object] = record) -> httpx.Response:
-            assert request.method == "POST"
-            assert request.url.path == "/api/v1/openapi/email/purchases/api-get"
-            return httpx.Response(
-                200,
-                json={
-                    "code": 0,
-                    "message": "success",
-                    "data": [rec],
-                },
-            )
+    provider = _make_provider(monkeypatch, FakeUser())
 
-        provider = LuckMailProvider(
-            base_url="https://mails.luckyous.com",
-            api_key="AC-test-key",
-            client=httpx.Client(
-                transport=httpx.MockTransport(handler),
-                base_url="https://mails.luckyous.com",
-            ),
+    try:
+        provider.acquire_inbox(
+            project_code='orchids',
+            domain='hotmail.com',
+            metadata={'tag_name': 'orchids-ready', 'mark_tag_name': 'orchids-used'},
         )
-
-        try:
-            provider.acquire_inbox(
-                project_code="orchids",
-                metadata={"tag_name": "orchids-ready", "mark_tag_name": "orchids-used"},
-            )
-        except RuntimeError as exc:
-            assert "LuckMail acquire failed" in str(exc)
-        else:
-            raise AssertionError("expected RuntimeError for invalid success values")
+    except RuntimeError as exc:
+        assert 'hotmail.com' in str(exc)
+    else:
+        raise AssertionError('expected RuntimeError when no purchased inbox matches requested domain')

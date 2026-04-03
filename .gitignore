@@ -37,3 +37,5 @@ mail-gateway/tests/.tmp*
 /orchids_login1.py
 /orchids_register1.py
 /zhuabao
+.worktrees/
+src-tauri/.codex-target/

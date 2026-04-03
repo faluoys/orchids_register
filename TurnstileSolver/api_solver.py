@@ -104,6 +104,10 @@ class TurnstileAPIServer:
     def display_welcome(self):
         """Displays welcome screen with logo."""
         self.console.clear()
+
+        if not self._supports_rich_welcome():
+            self._display_ascii_welcome()
+            return
         
         combined_text = Text()
         combined_text.append("\n📢 QQ: ", style="bold white")
@@ -124,6 +128,21 @@ class TurnstileAPIServer:
 
         self.console.print(info_panel)
         self.console.print()
+
+    def _supports_rich_welcome(self) -> bool:
+        stream = getattr(self.console, 'file', sys.stdout)
+        encoding = (getattr(stream, 'encoding', '') or '').lower()
+        return 'utf' in encoding
+
+    def _display_ascii_welcome(self) -> None:
+        stream = getattr(self.console, 'file', None)
+        if stream is None or not hasattr(stream, 'write'):
+            stream = sys.stdout
+        stream.write("Turnstile Solver\n")
+        stream.write("QQ: 3779239578\n")
+        stream.write("Version: 1.2a\n\n")
+        if hasattr(stream, 'flush'):
+            stream.flush()
 
 
 

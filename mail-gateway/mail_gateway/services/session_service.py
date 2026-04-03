@@ -15,10 +15,11 @@ class SessionService:
         self,
         provider_name: str,
         project_code: str | None,
+        domain: str | None,
         metadata: dict[str, str],
     ) -> InboxSessionRecord:
         provider = self.providers[provider_name]
-        acquired = provider.acquire_inbox(project_code, metadata)
+        acquired = provider.acquire_inbox(project_code, domain, metadata)
         record = InboxSessionRecord(
             session_id=f"ses_{uuid4().hex}",
             provider=provider_name,

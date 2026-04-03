@@ -33,6 +33,13 @@ $cargoArgs = @(
     '--result-json', $resultJson
 )
 
+if ($orchids.ContainsKey('mail_domain')) {
+    $mailDomain = [string]$orchids['mail_domain']
+    if (-not [string]::IsNullOrWhiteSpace($mailDomain)) {
+        $cargoArgs += @('--mail-domain', $mailDomain)
+    }
+}
+
 Write-Host "Config file: $resolvedConfigPath"
 Write-Host "CLI workdir: $workDir"
 Write-Host ("Command: cargo " + (Format-CommandPreview -Parts $cargoArgs))

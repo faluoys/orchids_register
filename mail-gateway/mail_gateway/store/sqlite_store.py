@@ -8,8 +8,8 @@ class SQLiteStore:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = str(db_path)
         self._memory_conn: sqlite3.Connection | None = None
-        if self.db_path == ":memory:":
-            self._memory_conn = sqlite3.connect(":memory:")
+        if self.db_path == ':memory:':
+            self._memory_conn = sqlite3.connect(':memory:', check_same_thread=False)
 
     def _connect(self) -> sqlite3.Connection:
         if self._memory_conn is not None:
@@ -66,7 +66,7 @@ class SQLiteStore:
     def get_session(self, session_id: str) -> InboxSessionRecord | None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT session_id, provider, mode, address, upstream_token, upstream_ref, project_code, status, last_message_id, created_at, expires_at FROM inbox_sessions WHERE session_id = ?",
+                'SELECT session_id, provider, mode, address, upstream_token, upstream_ref, project_code, status, last_message_id, created_at, expires_at FROM inbox_sessions WHERE session_id = ?',
                 (session_id,),
             ).fetchone()
         if row is None:
@@ -88,10 +88,10 @@ class SQLiteStore:
     def update_last_message_id(self, session_id: str, message_id: str) -> None:
         with self._connect() as conn:
             conn.execute(
-                "UPDATE inbox_sessions SET last_message_id = ? WHERE session_id = ?",
+                'UPDATE inbox_sessions SET last_message_id = ? WHERE session_id = ?',
                 (message_id, session_id),
             )
 
     def delete_session(self, session_id: str) -> None:
         with self._connect() as conn:
-            conn.execute("DELETE FROM inbox_sessions WHERE session_id = ?", (session_id,))
+            conn.execute('DELETE FROM inbox_sessions WHERE session_id = ?', (session_id,))

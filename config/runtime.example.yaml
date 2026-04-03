@@ -1,11 +1,29 @@
+# 使用说明：
+# 1. 实际使用时请生成 config/runtime.local.yaml，再把真实密钥写到本地文件里。
+# 2. 切换邮箱供应商时，重点看 4 个字段：
+#    - mail_gateway.luckmail_api_key / mail_gateway.yyds_api_key
+#    - orchids.mail_provider
+#    - orchids.mail_provider_mode
+#    - orchids.mail_domain
+# 3. 当前已接通：
+#    - YYDS：mail_provider = yyds_mail，mail_provider_mode = persistent
+#    - LuckMail：mail_provider = luckmail，mail_provider_mode = purchased
+# 4. DuckMail 目前只预留了 adapter 骨架，先不要切成 duckmail。
+# 5. 如果你修改了 mail_gateway 的 host/port，记得同步改 orchids.mail_gateway_base_url。
+
 conda_env: orchids-register
 
 mail_gateway:
+  # LuckMail 使用下面两项
   host: 127.0.0.1
   port: 8081
   database_path: mail-gateway/data/mail_gateway.db
   luckmail_base_url: https://mails.luckyous.com
   luckmail_api_key: REPLACE_WITH_REAL_LUCKMAIL_KEY
+
+  # YYDS 使用下面两项
+  yyds_base_url: https://maliapi.215.im/v1
+  yyds_api_key: REPLACE_WITH_REAL_YYDS_KEY
 
 turnstile_solver:
   host: 127.0.0.1
@@ -18,11 +36,28 @@ turnstile_solver:
   random: false
 
 orchids:
+  # 保持 gateway，不要改成 direct
   mail_mode: gateway
   mail_gateway_base_url: http://127.0.0.1:8081
-  mail_provider: luckmail
-  mail_provider_mode: purchased
+
+  # 切换供应商时这里最关键：
+  # - YYDS: yyds_mail
+  # - LuckMail: luckmail
+  mail_provider: yyds_mail
+
+  # 切换模式时这里也要一起改：
+  # - YYDS: persistent
+  # - LuckMail: purchased
+  mail_provider_mode: persistent
+
+  # 项目标识，当前 Orchids 先保持 orchids
   mail_project_code: orchids
+
+  # 想固定邮箱后缀时改这里，例如：
+  # - hotmail.com
+  # - outlook.com
+  # - gmail.com
+  mail_domain: hotmail.com
   poll_timeout: 180
   poll_interval: 2
   captcha_api_url: http://127.0.0.1:5000

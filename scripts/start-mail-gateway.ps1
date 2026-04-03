@@ -24,6 +24,8 @@ if (-not (Test-Path -LiteralPath $dbDir)) {
 $env:MAIL_GATEWAY_DB = $dbPath
 $env:LUCKMAIL_BASE_URL = [string]$mailGateway['luckmail_base_url']
 $env:LUCKMAIL_API_KEY = [string]$mailGateway['luckmail_api_key']
+$env:YYDS_BASE_URL = [string]$mailGateway['yyds_base_url']
+$env:YYDS_API_KEY = [string]$mailGateway['yyds_api_key']
 
 $condaArgs = @(
     'run', '-n', $condaEnv,
@@ -37,6 +39,9 @@ Write-Host "mail-gateway workdir: $workDir"
 Write-Host "MAIL_GATEWAY_DB=$dbPath"
 if ($env:LUCKMAIL_API_KEY -match 'REPLACE_WITH_REAL|your-real-key') {
     Write-Warning 'luckmail_api_key is still a placeholder. /health will likely not show enabled.'
+}
+if ($env:YYDS_API_KEY -match 'REPLACE_WITH_REAL|your-real-key') {
+    Write-Warning 'yyds_api_key is still a placeholder. /health will likely not show enabled.'
 }
 Write-Host ("Command: conda " + (Format-CommandPreview -Parts $condaArgs))
 

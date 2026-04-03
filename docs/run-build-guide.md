@@ -1,6 +1,6 @@
 # Orchids Register 运行与打包指南
 
-更新时间：2026-04-02
+更新时间：2026-04-03
 
 本文档已经切换为“优先改 YAML 配置文件，再执行脚本”的方式。
 
@@ -22,6 +22,7 @@
 - `scripts/start-dev-stack.bat`：PowerShell 启动器包装
 - `scripts/build-desktop.bat`：PowerShell 打包器包装
 - `scripts/run-cli-registration.bat`：PowerShell CLI 验证包装
+- `.taurignore`：Tauri dev watcher 忽略规则，避免网关层变化触发桌面开发模式重载
 
 ## 2. 配置文件说明
 
@@ -82,6 +83,8 @@ mail_gateway:
   database_path: mail-gateway/data/mail_gateway.db
   luckmail_base_url: https://mails.luckyous.com
   luckmail_api_key: REPLACE_WITH_REAL_LUCKMAIL_KEY
+  yyds_base_url: https://maliapi.215.im/v1
+  yyds_api_key: REPLACE_WITH_REAL_YYDS_KEY
 
 turnstile_solver:
   host: 127.0.0.1
@@ -96,9 +99,10 @@ turnstile_solver:
 orchids:
   mail_mode: gateway
   mail_gateway_base_url: http://127.0.0.1:8081
-  mail_provider: luckmail
-  mail_provider_mode: purchased
+  mail_provider: yyds_mail
+  mail_provider_mode: persistent
   mail_project_code: orchids
+  mail_domain: hotmail.com
   poll_timeout: 180
   poll_interval: 2
   captcha_api_url: http://127.0.0.1:5000
@@ -107,7 +111,11 @@ orchids:
 
 最重要的是：
 
-- 把 `luckmail_api_key` 改成你的真实 Key
+- 你要用 YYDS 时，把 `yyds_api_key` 改成真实 Key，并把 `orchids.mail_provider` 设成 `yyds_mail`
+- 你要用 LuckMail 时，把 `luckmail_api_key` 改成真实 Key，并把 `orchids.mail_provider` 设成 `luckmail`
+- YYDS 对应 `orchids.mail_provider_mode = persistent`
+- LuckMail 对应 `orchids.mail_provider_mode = purchased`
+- 如果你想固定域名后缀，可以填 `orchids.mail_domain`，例如 `hotmail.com`、`outlook.com`
 - 如果你想改端口，也要同步改 `orchids.mail_gateway_base_url`
 
 ### 2.3 YAML 使用限制
@@ -228,6 +236,14 @@ cd orchids_register
 .\scripts\start-mail-gateway.ps1
 ```
 
+这个脚本会自动把下面这些环境变量注入到当前进程里：
+
+- `MAIL_GATEWAY_DB`
+- `LUCKMAIL_BASE_URL`
+- `LUCKMAIL_API_KEY`
+- `YYDS_BASE_URL`
+- `YYDS_API_KEY`
+
 ### 5.3 单独启动 TurnstileSolver
 
 ```powershell
@@ -267,11 +283,11 @@ cd orchids_register
 
 ### 7.1 启动 mail-gateway
 
+更推荐直接用脚本，因为脚本会自动注入 LuckMail / YYDS 环境变量。
+
 ```powershell
-conda activate orchids-register
 cd orchids_register
-cd .\mail-gateway
-python -m uvicorn mail_gateway.app:app --host 127.0.0.1 --port 8081
+.\scripts\start-mail-gateway.ps1
 ```
 
 ### 7.2 启动 TurnstileSolver
@@ -331,8 +347,11 @@ mail-gateway 数据库默认在：
 - `mail_gateway.host`
 - `mail_gateway.port`
 - `mail_gateway.luckmail_api_key`
+- `mail_gateway.yyds_api_key`
 - `turnstile_solver.port`
 - `orchids.mail_gateway_base_url`
+- `orchids.mail_provider`
+- `orchids.mail_provider_mode`
 
 ### 9.2 再跑 DryRun
 
@@ -372,15 +391,32 @@ mail-gateway 数据库默认在：
 .\scripts\init-runtime-config.ps1
 ```
 
-### 10.2 `luckmail` 不是 `enabled`
+### 10.2 `/health` 里 provider 不是 `enabled`
 
-大概率是 [runtime.local.yaml](../config/runtime.local.yaml) 里的 `luckmail_api_key` 还没换成真实值。
+大概率是 [runtime.local.yaml](../config/runtime.local.yaml) 里的真实 Key 还没填对。
 
-### 10.3 一键脚本打开了窗口，但服务没起来
+- `luckmail` 取决于 `mail_gateway.luckmail_api_key`
+- `yyds_mail` 取决于 `mail_gateway.yyds_api_key`
+
+### 10.3 YYDS 已经 release，但远端邮箱还在
+
+这是当前设计里的正常行为。
+
+YYDS 走的是持久邮箱模式，`mail-gateway` 删除 session 时只清本地会话，不会主动删除远端收件箱。
+
+### 10.4 一键脚本打开了窗口，但服务没起来
 
 先看新窗口里打印的实际命令，再单独执行对应 `.ps1`。
 
-### 10.4 `cargo tauri build` 失败
+### 10.5 点击开始注册后，`cargo tauri dev` 看起来像重启了一次
+
+现在仓库根目录已经新增 `.taurignore`，默认忽略 `mail-gateway/**`。
+
+也就是说，网关数据库 `mail-gateway/data/mail_gateway.db` 发生变化时，不会再触发 Tauri 开发模式自动重载。
+
+如果你已经开着 `cargo tauri dev`，在新增 `.taurignore` 后请手动重启一次桌面开发窗口。
+
+### 10.6 `cargo tauri build` 失败
 
 先拆开执行：
 
@@ -395,7 +431,7 @@ cd orchids_register
 cargo check -p orchids-auto-register-portable
 ```
 
-### 10.5 我不想碰 PowerShell，只想双击
+### 10.7 我不想碰 PowerShell，只想双击
 
 直接双击：
 
@@ -403,4 +439,3 @@ cargo check -p orchids-auto-register-portable
 - `scripts\start-dev-stack.bat`
 - `scripts\build-desktop.bat`
 - `scripts\run-cli-registration.bat`
-

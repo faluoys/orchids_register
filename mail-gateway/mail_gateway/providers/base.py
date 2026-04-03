@@ -20,7 +20,13 @@ class PollResult:
 
 
 class InboxProvider(Protocol):
-    def acquire_inbox(self, project_code: str | None, metadata: dict[str, str]) -> AcquiredInbox: ...
+    def acquire_inbox(
+        self,
+        project_code: str | None,
+        domain: str | None,
+        metadata: dict[str, str],
+    ) -> AcquiredInbox: ...
+
     def poll_code(
         self,
         upstream_token: str,
@@ -29,4 +35,5 @@ class InboxProvider(Protocol):
         code_pattern: str,
         after_ts: int | None,
     ) -> PollResult: ...
+
     def release_inbox(self, upstream_ref: str, upstream_token: str) -> None: ...
