@@ -4,7 +4,9 @@ import type {
   AccountGroup,
   Domain,
   MailGatewayHealthResult,
+  ManagedServiceName,
   RegisterArgs,
+  ServiceStatus,
 } from "./types";
 
 // Register
@@ -133,4 +135,24 @@ export async function testMailGatewayHealth(
   apiKey: string | null
 ): Promise<MailGatewayHealthResult> {
   return invoke("test_mail_gateway_health", { baseUrl, apiKey });
+}
+
+export async function getServiceStatus(): Promise<Record<ManagedServiceName, ServiceStatus>> {
+  return invoke("get_service_status");
+}
+
+export async function startMailGateway(): Promise<ServiceStatus> {
+  return invoke("start_mail_gateway");
+}
+
+export async function stopMailGateway(): Promise<ServiceStatus> {
+  return invoke("stop_mail_gateway");
+}
+
+export async function startTurnstileSolver(): Promise<ServiceStatus> {
+  return invoke("start_turnstile_solver");
+}
+
+export async function stopTurnstileSolver(): Promise<ServiceStatus> {
+  return invoke("stop_turnstile_solver");
 }

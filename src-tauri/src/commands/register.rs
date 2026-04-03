@@ -6,6 +6,10 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::db::{self, NewAccount};
 use crate::orchids_profile;
+use crate::service_manager::{
+    build_mail_gateway_probe_target, build_turnstile_solver_probe_target, ServiceStatus,
+    MAIL_GATEWAY_SERVICE, TURNSTILE_SOLVER_SERVICE,
+};
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +97,12 @@ fn option_is_missing(value: &Option<String>) -> bool {
         .unwrap_or(true)
 }
 
+fn derived_http_url(config: &HashMap<String, String>, host_key: &str, port_key: &str) -> Option<String> {
+    let host = config_string(config, host_key)?;
+    let port = config_string(config, port_key)?;
+    Some(format!("http://{}:{}", host, port))
+}
+
 fn apply_register_config(args: &mut RegisterArgs, config: &HashMap<String, String>) {
     if option_is_missing(&args.proxy) {
         args.proxy = config_string(config, "proxy");
@@ -104,7 +114,8 @@ fn apply_register_config(args: &mut RegisterArgs, config: &HashMap<String, Strin
         }
     }
     if option_is_missing(&args.mail_gateway_base_url) {
-        args.mail_gateway_base_url = config_string(config, "mail_gateway_base_url");
+        args.mail_gateway_base_url = config_string(config, "mail_gateway_base_url")
+            .or_else(|| derived_http_url(config, "mail_gateway_host", "mail_gateway_port"));
     }
     if option_is_missing(&args.mail_gateway_api_key) {
         args.mail_gateway_api_key = config_string(config, "mail_gateway_api_key");
@@ -128,10 +139,61 @@ fn apply_register_config(args: &mut RegisterArgs, config: &HashMap<String, Strin
 
     if let Some(value) = config_string(config, "captcha_api_url") {
         args.captcha_api_url = value;
+    } else if let Some(value) = derived_http_url(config, "turnstile_host", "turnstile_port") {
+        args.captcha_api_url = value;
     }
     if let Some(value) = config_string(config, "proxy_pool_api") {
         args.proxy_pool_api = value;
     }
+}
+
+fn validate_desktop_preflight(
+    args: &RegisterArgs,
+    config: &HashMap<String, String>,
+    service_status: &HashMap<String, ServiceStatus>,
+) -> Result<(), String> {
+    if args.mail_mode.eq_ignore_ascii_case("gateway") {
+        if args
+            .mail_gateway_base_url
+            .as_ref()
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
+        {
+            return Err("mail-gateway base URL is not configured".to_string());
+        }
+
+        let mail_gateway_running = service_status
+            .get(MAIL_GATEWAY_SERVICE)
+            .map(|status| status.running)
+            .unwrap_or(false);
+        if !mail_gateway_running {
+            return Err("Please start Mail Gateway first".to_string());
+        }
+
+        if args.mail_provider.eq_ignore_ascii_case("luckmail")
+            && config_string(config, "luckmail_api_key").is_none()
+        {
+            return Err("LuckMail API Key is missing".to_string());
+        }
+
+        if args.mail_provider.eq_ignore_ascii_case("yyds_mail")
+            && config_string(config, "yyds_api_key").is_none()
+        {
+            return Err("YYDS API Key is missing".to_string());
+        }
+    }
+
+    if args.use_capmonster {
+        let turnstile_running = service_status
+            .get(TURNSTILE_SOLVER_SERVICE)
+            .map(|status| status.running)
+            .unwrap_or(false);
+        if !turnstile_running {
+            return Err("Please start TurnstileSolver first".to_string());
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -152,11 +214,21 @@ pub async fn start_registration(
 
     // 从 DB 读取配置并注入到 args
     let mut args = args;
+    let mut config_snapshot = HashMap::new();
     if let Ok(conn) = db.lock() {
         if let Ok(config) = db::get_all_config(&conn) {
+            config_snapshot = config.clone();
             apply_register_config(&mut args, &config);
         }
     }
+    let service_status = {
+        let mut services = state.services.lock().map_err(|e| e.to_string())?;
+        services.get_status_map_with_targets(
+            build_mail_gateway_probe_target(&config_snapshot).ok(),
+            build_turnstile_solver_probe_target(&config_snapshot).ok(),
+        )
+    };
+    validate_desktop_preflight(&args, &config_snapshot, &service_status)?;
 
     let cli_args = args.to_cli_args();
 
@@ -209,9 +281,20 @@ pub async fn start_registration(
                 let password = reg_result.password.clone().unwrap_or_default();
                 let timeout = args.timeout;
                 let proxy = args.proxy.clone();
+                let existing_session = orchids_profile::ExistingSessionContext {
+                    session_id: reg_result.created_session_id.clone(),
+                    user_id: reg_result.created_user_id.clone(),
+                    session_jwt: reg_result.desktop_jwt.clone(),
+                };
                 let db2 = db.clone();
                 tokio::task::spawn_blocking(move || {
-                    if let Ok(profile) = orchids_profile::fetch_plan_and_credits(&email, &password, timeout, proxy.as_deref()) {
+                    if let Ok(profile) = orchids_profile::fetch_plan_and_credits_with_session(
+                        &email,
+                        &password,
+                        timeout,
+                        proxy.as_deref(),
+                        Some(&existing_session),
+                    ) {
                         if let Ok(conn) = db2.lock() {
                             let _ = db::update_account_plan_credits(
                                 &conn,
@@ -257,11 +340,21 @@ pub async fn start_batch_registration(
 
     // 从 DB 读取配置并注入到 args
     let mut args = args;
+    let mut config_snapshot = HashMap::new();
     if let Ok(conn) = db.lock() {
         if let Ok(config) = db::get_all_config(&conn) {
+            config_snapshot = config.clone();
             apply_register_config(&mut args, &config);
         }
     }
+    let service_status = {
+        let mut services = state.services.lock().map_err(|e| e.to_string())?;
+        services.get_status_map_with_targets(
+            build_mail_gateway_probe_target(&config_snapshot).ok(),
+            build_turnstile_solver_probe_target(&config_snapshot).ok(),
+        )
+    };
+    validate_desktop_preflight(&args, &config_snapshot, &service_status)?;
 
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency.clamp(1, 5)));
 
@@ -368,9 +461,18 @@ pub async fn start_batch_registration(
                                     let email2 = email_for_progress.clone();
                                     let password2 = password_for_profile.clone();
                                     let proxy2 = proxy.clone();
+                                    let existing_session = orchids_profile::ExistingSessionContext {
+                                        session_id: reg_result.created_session_id.clone(),
+                                        user_id: reg_result.created_user_id.clone(),
+                                        session_jwt: reg_result.desktop_jwt.clone(),
+                                    };
                                     tokio::task::spawn_blocking(move || {
-                                        if let Ok(profile) = orchids_profile::fetch_plan_and_credits(
-                                            &email2, &password2, timeout, proxy2.as_deref(),
+                                        if let Ok(profile) = orchids_profile::fetch_plan_and_credits_with_session(
+                                            &email2,
+                                            &password2,
+                                            timeout,
+                                            proxy2.as_deref(),
+                                            Some(&existing_session),
                                         ) {
                                             if let Ok(conn2) = db2.lock() {
                                                 let _ = db::update_account_plan_credits(
@@ -450,4 +552,86 @@ pub async fn start_batch_registration(
 pub async fn cancel_batch(state: State<'_, AppState>) -> Result<(), String> {
     state.batch_cancel.store(true, Ordering::SeqCst);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_desktop_preflight, RegisterArgs};
+    use crate::service_manager::{
+        ServiceStatus, MAIL_GATEWAY_SERVICE, TURNSTILE_SOLVER_SERVICE,
+    };
+    use std::collections::HashMap;
+
+    fn sample_register_args() -> RegisterArgs {
+        RegisterArgs {
+            email: None,
+            password: None,
+            captcha_token: None,
+            use_capmonster: true,
+            captcha_api_url: "http://127.0.0.1:5000".to_string(),
+            captcha_timeout: 180,
+            captcha_poll_interval: 3.0,
+            captcha_website_url: "https://accounts.orchids.app/".to_string(),
+            captcha_website_key: "site-key".to_string(),
+            email_code: None,
+            locale: "zh-CN".to_string(),
+            timeout: 30,
+            mail_mode: "gateway".to_string(),
+            mail_gateway_base_url: Some("http://127.0.0.1:8081".to_string()),
+            mail_gateway_api_key: None,
+            mail_provider: "luckmail".to_string(),
+            mail_provider_mode: "purchased".to_string(),
+            mail_project_code: Some("orchids".to_string()),
+            mail_domain: None,
+            poll_timeout: 180,
+            poll_interval: 2.0,
+            code_pattern: "\\b(\\d{6})\\b".to_string(),
+            debug_email: true,
+            test_desktop_session: true,
+            proxy: None,
+            use_proxy_pool: false,
+            proxy_pool_api: "https://example.com/proxy".to_string(),
+        }
+    }
+
+    fn running_status() -> ServiceStatus {
+        ServiceStatus {
+            running: true,
+            pid: Some(1234),
+            last_started_at: Some("2026-04-03 21:00:00".to_string()),
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn registration_preflight_requires_gateway_base_url() {
+        let mut args = sample_register_args();
+        args.mail_gateway_base_url = None;
+
+        let err = validate_desktop_preflight(&args, &HashMap::new(), &HashMap::new())
+            .expect_err("should fail");
+
+        assert!(err.contains("mail-gateway"));
+    }
+
+    #[test]
+    fn registration_preflight_requires_managed_services_and_provider_key() {
+        let args = sample_register_args();
+        let mut config = HashMap::new();
+        config.insert("luckmail_api_key".to_string(), "key-1".to_string());
+
+        let err = validate_desktop_preflight(&args, &config, &HashMap::new())
+            .expect_err("should fail");
+        assert!(err.contains("Mail Gateway"));
+
+        let mut statuses = HashMap::new();
+        statuses.insert(MAIL_GATEWAY_SERVICE.to_string(), running_status());
+        let err = validate_desktop_preflight(&args, &HashMap::new(), &statuses)
+            .expect_err("should fail");
+        assert!(err.contains("LuckMail"));
+
+        statuses.insert(TURNSTILE_SOLVER_SERVICE.to_string(), running_status());
+        let ok = validate_desktop_preflight(&args, &config, &statuses);
+        assert!(ok.is_ok());
+    }
 }

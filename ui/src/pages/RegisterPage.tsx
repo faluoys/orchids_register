@@ -1,7 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { ChevronDown, ChevronRight } from "lucide-react";
-import { startRegistration, startBatchRegistration, cancelBatch, getAllConfig } from "@/lib/tauri-api";
+import {
+  startRegistration,
+  startBatchRegistration,
+  cancelBatch,
+  getAllConfig,
+  getServiceStatus,
+} from "@/lib/tauri-api";
 import type { LogEntry, RegisterArgs, BatchProgress, BatchComplete } from "@/lib/types";
 
 const defaultArgs: RegisterArgs = {
@@ -31,10 +37,22 @@ const defaultArgs: RegisterArgs = {
   test_desktop_session: true,
   proxy: null,
   use_proxy_pool: false,
-  proxy_pool_api: "https://api.douyadaili.com/proxy/?service=GetUnl&authkey=1KB6xBwGlITDeICSw6BI&num=10&lifetime=1&prot=0&format=txt&cstmfmt=%7Bip%7D%7C%7Bport%7D&separator=%5Cr%5Cn&distinct=1&detail=0&portlen=0",
+  proxy_pool_api:
+    "https://api.douyadaili.com/proxy/?service=GetUnl&authkey=1KB6xBwGlITDeICSw6BI&num=10&lifetime=1&prot=0&format=txt&cstmfmt=%7Bip%7D%7C%7Bport%7D&separator=%5Cr%5Cn&distinct=1&detail=0&portlen=0",
 };
 
 const LOG_TRUNCATE_LEN = 200;
+
+function deriveUrl(
+  host: string | undefined,
+  port: string | undefined,
+  fallback: string
+): string {
+  if (host?.trim() && port?.trim()) {
+    return `http://${host.trim()}:${port.trim()}`;
+  }
+  return fallback;
+}
 
 function LogLine({ log }: { log: LogEntry }) {
   const [expanded, setExpanded] = useState(false);
@@ -82,14 +100,14 @@ export default function RegisterPage() {
   const [regCount, setRegCount] = useState(1);
   const [regThreads, setRegThreads] = useState(1);
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null);
-  const [startedCount, setStartedCount] = useState(0); // 已经启动的账号数量（包含并发中的任务）
+  const [startedCount, setStartedCount] = useState(0);
 
-  // Time tracking
   const [totalElapsed, setTotalElapsed] = useState(0);
   const [currentElapsed, setCurrentElapsed] = useState(0);
   const [successCount, setSuccessCount] = useState(0);
   const [failCount, setFailCount] = useState(0);
   const [currentIdx, setCurrentIdx] = useState(0);
+  const [preflightError, setPreflightError] = useState<string | null>(null);
 
   const logEndRef = useRef<HTMLDivElement>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -102,12 +120,10 @@ export default function RegisterPage() {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
 
-  // 跟踪最新的并行线程配置，避免事件回调闭包读取旧值
   useEffect(() => {
     regThreadsRef.current = regThreads;
   }, [regThreads]);
 
-  // Timer effect
   useEffect(() => {
     if (isRunning) {
       startTimeRef.current = Date.now();
@@ -116,14 +132,15 @@ export default function RegisterPage() {
         setTotalElapsed(Math.floor((Date.now() - startTimeRef.current) / 1000));
         setCurrentElapsed(Math.floor((Date.now() - currentStartRef.current) / 1000));
       }, 1000);
-    } else {
+    } else if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+
+    return () => {
       if (timerRef.current) {
         clearInterval(timerRef.current);
-        timerRef.current = null;
       }
-    }
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
     };
   }, [isRunning]);
 
@@ -164,7 +181,6 @@ export default function RegisterPage() {
           timestamp: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
         },
       ]);
-      // 通知 AccountsPage 刷新
       window.dispatchEvent(new CustomEvent("accounts-changed"));
     });
 
@@ -175,14 +191,34 @@ export default function RegisterPage() {
     };
   }, []);
 
-  const buildArgs = useCallback(async (): Promise<RegisterArgs> => {
-    try {
-      const config = await getAllConfig();
+  const buildArgs = useCallback(async (): Promise<{
+    args: RegisterArgs;
+    config: Record<string, string>;
+  }> => {
+    const config = await getAllConfig();
+    const mailGatewayBaseUrl = (
+      config["mail_gateway_base_url"] ||
+      deriveUrl(
+        config["mail_gateway_host"],
+        config["mail_gateway_port"],
+        defaultArgs.mail_gateway_base_url || "http://127.0.0.1:8081"
+      )
+    ).trim();
+    const captchaApiUrl = (
+      config["captcha_api_url"] ||
+      deriveUrl(
+        config["turnstile_host"],
+        config["turnstile_port"],
+        defaultArgs.captcha_api_url
+      )
+    ).trim();
 
-      return {
+    return {
+      config,
+      args: {
         ...defaultArgs,
         password: config["password"] || null,
-        captcha_api_url: config["captcha_api_url"] || defaultArgs.captcha_api_url,
+        captcha_api_url: captchaApiUrl || defaultArgs.captcha_api_url,
         captcha_timeout: Number(config["captcha_timeout"]) || defaultArgs.captcha_timeout,
         captcha_poll_interval: Number(config["captcha_poll_interval"]) || defaultArgs.captcha_poll_interval,
         captcha_website_key: config["captcha_website_key"] || defaultArgs.captcha_website_key,
@@ -192,7 +228,7 @@ export default function RegisterPage() {
         poll_timeout: Number(config["poll_timeout"]) || defaultArgs.poll_timeout,
         poll_interval: Number(config["poll_interval"]) || defaultArgs.poll_interval,
         mail_mode: config["mail_mode"] || defaultArgs.mail_mode,
-        mail_gateway_base_url: config["mail_gateway_base_url"] || null,
+        mail_gateway_base_url: mailGatewayBaseUrl || null,
         mail_gateway_api_key: config["mail_gateway_api_key"] || null,
         mail_provider: config["mail_provider"] || defaultArgs.mail_provider,
         mail_provider_mode: config["mail_provider_mode"] || defaultArgs.mail_provider_mode,
@@ -201,15 +237,40 @@ export default function RegisterPage() {
         proxy: config["proxy"] || null,
         use_proxy_pool: config["use_proxy_pool"] === "true",
         proxy_pool_api: config["proxy_pool_api"] || defaultArgs.proxy_pool_api,
-      };
-    } catch {
-      return defaultArgs;
+      },
+    };
+  }, []);
+
+  const runDesktopPreflight = useCallback(async (
+    args: RegisterArgs,
+    config: Record<string, string>
+  ) => {
+    const statuses = await getServiceStatus();
+
+    if (args.mail_mode === "gateway") {
+      if (!args.mail_gateway_base_url?.trim()) {
+        throw new Error("Mail Gateway 地址未配置");
+      }
+      if (!statuses.mail_gateway?.running) {
+        throw new Error("请先启动 Mail Gateway 服务");
+      }
+      if (args.mail_provider === "luckmail" && !(config["luckmail_api_key"] || "").trim()) {
+        throw new Error("LuckMail API Key 未配置");
+      }
+      if (args.mail_provider === "yyds_mail" && !(config["yyds_api_key"] || "").trim()) {
+        throw new Error("YYDS API Key 未配置");
+      }
+    }
+
+    if (args.use_capmonster && !statuses.turnstile_solver?.running) {
+      throw new Error("请先启动 TurnstileSolver 服务");
     }
   }, []);
 
   const handleStart = async () => {
     setIsRunning(true);
     setIsStopping(false);
+    setPreflightError(null);
     setLogs([]);
     setSuccessCount(0);
     setFailCount(0);
@@ -221,7 +282,8 @@ export default function RegisterPage() {
     setBatchProgress(null);
 
     try {
-      const args = await buildArgs();
+      const { args, config } = await buildArgs();
+      await runDesktopPreflight(args, config);
       if (regCount === 1) {
         await startRegistration(args);
         setStartedCount(1);
@@ -231,13 +293,12 @@ export default function RegisterPage() {
           ...prev,
           {
             step: "完成",
-            message: "注册成功!",
+            message: "注册成功！",
             level: "info",
             timestamp: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
           },
         ]);
         setIsRunning(false);
-        // 通知 AccountsPage 刷新
         window.dispatchEvent(new CustomEvent("accounts-changed"));
       } else {
         const initialStarted = Math.min(regThreadsRef.current, regCount);
@@ -245,9 +306,9 @@ export default function RegisterPage() {
         prevStartedRef.current = initialStarted;
         currentStartRef.current = Date.now();
         await startBatchRegistration(args, regCount, regThreads);
-        // batch-complete 事件会设置 isRunning = false
       }
     } catch (e: any) {
+      setPreflightError(String(e));
       setLogs((prev) => [
         ...prev,
         {
@@ -288,11 +349,11 @@ export default function RegisterPage() {
     }
   };
 
-  // 当 startedCount 更新且仍在运行时，重置单个账号的计时器
   useEffect(() => {
-    if (!isRunning) return;
-    if (startedCount === 0) return;
-    // 仅在 startedCount 增加时重置（避免同值重复重置）
+    if (!isRunning || startedCount === 0) {
+      return;
+    }
+
     if (startedCount > prevStartedRef.current) {
       prevStartedRef.current = startedCount;
       currentStartRef.current = Date.now();
@@ -309,20 +370,34 @@ export default function RegisterPage() {
   const runningIndices = isRunning
     ? Array.from({ length: runningCount }, (_, i) => `#${runningStart + i}`)
     : [];
-  const displayCurrentIdx = runningIndices.length > 0 ? runningIndices.join("，") : currentIdx || "-";
+  const displayCurrentIdx = runningIndices.length > 0 ? runningIndices.join("、") : currentIdx || "-";
 
   return (
     <>
-      {/* Page header */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap", flexShrink: 0 }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 16,
+          flexWrap: "wrap",
+          flexShrink: 0,
+        }}
+      >
         <h1 className="page-title">自动注册</h1>
       </div>
 
-      {/* Two-column layout (Codex-style) - must fill remaining height */}
       <div className="register-layout">
-        {/* Left panel: controls + stats */}
         <div className="register-left">
-          {/* Registration settings */}
+          {preflightError ? (
+            <div
+              className="status-bar"
+              style={{ color: "var(--danger)", borderColor: "rgba(224, 69, 69, 0.2)" }}
+            >
+              {preflightError}
+            </div>
+          ) : null}
+
           <div className="reg-section">
             <div className="reg-section-title">注册设置</div>
             <div className="reg-field">
@@ -377,7 +452,6 @@ export default function RegisterPage() {
             </div>
           </div>
 
-          {/* Progress stats */}
           <div className="reg-section">
             <div className="reg-section-title">注册进度</div>
             <div className="reg-progress-bar-wrap">
@@ -405,7 +479,6 @@ export default function RegisterPage() {
             </div>
           </div>
 
-          {/* Time stats */}
           <div className="reg-section">
             <div className="reg-section-title">时间统计</div>
             <div className="reg-time-grid">
@@ -418,7 +491,7 @@ export default function RegisterPage() {
                 <span className="reg-time-value">{formatTime(avgTime)}</span>
               </div>
               <div className="reg-time-item">
-                <span className="reg-time-label">当前第</span>
+                <span className="reg-time-label">当前账号</span>
                 <span className="reg-time-value">{displayCurrentIdx}</span>
               </div>
               <div className="reg-time-item">
@@ -429,13 +502,14 @@ export default function RegisterPage() {
           </div>
         </div>
 
-        {/* Right panel: log */}
         <div className="register-right">
           <div className="log-container">
             <div className="log-header">
               <span>注册日志</span>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ fontSize: 11, color: "var(--muted)", opacity: 0.6 }}>{logs.length} 条</span>
+                <span style={{ fontSize: 11, color: "var(--muted)", opacity: 0.6 }}>
+                  {logs.length} 条
+                </span>
                 <button
                   className="btn btn-sm btn-clear"
                   onClick={() => {
