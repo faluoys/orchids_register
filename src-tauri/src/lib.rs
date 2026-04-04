@@ -55,6 +55,8 @@ pub fn run() {
             commands::accounts::get_accounts,
             commands::accounts::refresh_accounts_profile_missing,
             commands::accounts::refresh_account_profile,
+            commands::accounts::open_account_completion_window,
+            commands::accounts::check_account_completion,
             commands::accounts::delete_account,
             commands::accounts::delete_accounts,
             commands::accounts::export_accounts,

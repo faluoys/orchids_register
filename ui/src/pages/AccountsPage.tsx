@@ -13,9 +13,13 @@ import {
   Check,
   FolderInput,
   Download,
+  ArrowUpRight,
+  ShieldCheck,
 } from "lucide-react";
 import {
+  checkAccountCompletion,
   getAccounts,
+  openAccountCompletionWindow,
   refreshAccountsProfileMissing,
   refreshAccountProfile,
   deleteAccount,
@@ -35,6 +39,10 @@ const statusConfig: Record<string, { label: string; icon: typeof Clock; classNam
 };
 
 const PAGE_SIZE = 20;
+
+function isCompletionEligible(account: Account) {
+  return account.register_complete && (account.plan === null || account.credits === null);
+}
 
 function MoveGroupDialog({
   open,
@@ -254,6 +262,98 @@ function ExportCookiesDialog({
   );
 }
 
+function CompletionHandoffDialog({
+  account,
+  open,
+  opening,
+  checking,
+  error,
+  onClose,
+  onOpenWindow,
+  onCheckCompletion,
+}: {
+  account: Account | null;
+  open: boolean;
+  opening: boolean;
+  checking: boolean;
+  error: string | null;
+  onClose: () => void;
+  onOpenWindow: () => void;
+  onCheckCompletion: () => void;
+}) {
+  if (!open || !account) return null;
+
+  return (
+    <div className="modal-overlay animate-fade-in" onClick={onClose}>
+      <div
+        className="modal-content animate-rise"
+        style={{ width: "min(680px, 100%)" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="modal-header">
+          <h3>继续补全账号</h3>
+          <button className="modal-close" onClick={onClose}>
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div className="config-panel" style={{ padding: 14 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+              <ShieldCheck size={16} />
+              <strong>{account.email}</strong>
+            </div>
+            <div style={{ color: "var(--muted)", fontSize: 13, lineHeight: 1.65 }}>
+              这个账号已经注册成功，但桌面端还没有拿到完整的套餐或 Credits。
+              请先打开补全窗口，在 Orchids 页面里手动完成登录和真实访客验证，
+              然后回到这里点击“我已完成，继续检测”。
+            </div>
+          </div>
+
+          <div className="config-panel" style={{ padding: 14 }}>
+            <div className="settings-title" style={{ marginBottom: 8 }}>操作步骤</div>
+            <div style={{ display: "grid", gap: 8, color: "#2f4d73", fontSize: 13 }}>
+              <div>1. 打开补全窗口</div>
+              <div>2. 在新窗口内手动登录并完成验证</div>
+              <div>3. 返回这里继续检测补全结果</div>
+            </div>
+          </div>
+
+          {error && (
+            <div
+              className="config-panel"
+              style={{
+                padding: 12,
+                borderColor: "rgba(220, 38, 38, 0.25)",
+                background: "rgba(220, 38, 38, 0.06)",
+                color: "#991b1b",
+                fontSize: 13,
+                lineHeight: 1.6,
+              }}
+            >
+              {error}
+            </div>
+          )}
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexWrap: "wrap" }}>
+          <button className="btn btn-clear btn-sm" onClick={onClose} disabled={opening || checking}>
+            关闭
+          </button>
+          <button className="btn btn-clear btn-sm" onClick={onOpenWindow} disabled={opening || checking}>
+            {opening ? <Loader2 size={14} className="animate-spin" /> : <ArrowUpRight size={14} />}
+            打开补全窗口
+          </button>
+          <button className="btn btn-sm" onClick={onCheckCompletion} disabled={opening || checking}>
+            {checking ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+            我已完成，继续检测
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // --- Detail Dialog (Codex-style modal) ---
 function DetailDialog({ account, onClose }: { account: Account; onClose: () => void }) {
   const [copiedField, setCopiedField] = useState<string | null>(null);
@@ -379,6 +479,10 @@ export default function AccountsPage() {
   const [exportCount, setExportCount] = useState(1);
   const [exporting, setExporting] = useState(false);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("cookie");
+  const [completionAccount, setCompletionAccount] = useState<Account | null>(null);
+  const [openingCompletion, setOpeningCompletion] = useState(false);
+  const [checkingCompletion, setCheckingCompletion] = useState(false);
+  const [completionError, setCompletionError] = useState<string | null>(null);
   const refreshingProfilesRef = useRef(false);
 
   const defaultGroup = groups.find((g) => g.is_default) || groups[0];
@@ -494,6 +598,41 @@ export default function AccountsPage() {
       alert(`刷新失败: ${String(e)}`);
     } finally {
       setRefreshingAccountId(null);
+    }
+  };
+
+  const openCompletionDialog = (account: Account) => {
+    setCompletionAccount(account);
+    setCompletionError(null);
+  };
+
+  const handleOpenCompletionWindow = async () => {
+    if (!completionAccount) return;
+    setOpeningCompletion(true);
+    setCompletionError(null);
+    try {
+      await openAccountCompletionWindow(completionAccount.id);
+    } catch (e) {
+      setCompletionError(String(e));
+    } finally {
+      setOpeningCompletion(false);
+    }
+  };
+
+  const handleCheckCompletion = async () => {
+    if (!completionAccount) return;
+    setCheckingCompletion(true);
+    setCompletionError(null);
+    try {
+      const updated = await checkAccountCompletion(completionAccount.id);
+      setCompletionAccount(updated);
+      setDetailAccount((prev) => (prev?.id === updated.id ? updated : prev));
+      await fetchAccounts();
+      setCompletionAccount(null);
+    } catch (e) {
+      setCompletionError(String(e));
+    } finally {
+      setCheckingCompletion(false);
     }
   };
 
@@ -730,7 +869,7 @@ export default function AccountsPage() {
               <th>套餐</th>
               <th>Credits</th>
               <th>创建时间</th>
-              <th style={{ width: 88, textAlign: "center" }}>操作</th>
+              <th style={{ width: 116, textAlign: "center" }}>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -789,6 +928,25 @@ export default function AccountsPage() {
                     <td style={{ fontSize: 12, color: "var(--muted)" }}>{account.created_at}</td>
                     <td style={{ textAlign: "center" }}>
                       <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                        {isCompletionEligible(account) && (
+                          <button
+                            onClick={() => openCompletionDialog(account)}
+                            style={{
+                              padding: 4,
+                              border: "none",
+                              background: "transparent",
+                              cursor: "pointer",
+                              color: "var(--muted)",
+                              borderRadius: 6,
+                              transition: "color 0.15s, background 0.15s",
+                            }}
+                            onMouseOver={(e) => { e.currentTarget.style.color = "var(--accent)"; e.currentTarget.style.background = "rgba(29,125,242,0.1)"; }}
+                            onMouseOut={(e) => { e.currentTarget.style.color = "var(--muted)"; e.currentTarget.style.background = "transparent"; }}
+                            title="继续补全"
+                          >
+                            <ArrowUpRight size={14} />
+                          </button>
+                        )}
                         <button
                           onClick={() => handleRefreshAccount(account.id)}
                           style={{
@@ -894,6 +1052,21 @@ export default function AccountsPage() {
         selectedCount={selectedIds.size}
         exportFormat={exportFormat}
         setExportFormat={setExportFormat}
+      />
+
+      <CompletionHandoffDialog
+        account={completionAccount}
+        open={completionAccount !== null}
+        opening={openingCompletion}
+        checking={checkingCompletion}
+        error={completionError}
+        onClose={() => {
+          if (openingCompletion || checkingCompletion) return;
+          setCompletionAccount(null);
+          setCompletionError(null);
+        }}
+        onOpenWindow={handleOpenCompletionWindow}
+        onCheckCompletion={handleCheckCompletion}
       />
     </>
   );

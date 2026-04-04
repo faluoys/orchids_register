@@ -48,6 +48,14 @@ export async function refreshAccountProfile(id: number): Promise<Account> {
   return invoke("refresh_account_profile", { id });
 }
 
+export async function openAccountCompletionWindow(accountId: number): Promise<void> {
+  return invoke("open_account_completion_window", { accountId });
+}
+
+export async function checkAccountCompletion(accountId: number): Promise<Account> {
+  return invoke("check_account_completion", { accountId });
+}
+
 export async function deleteAccount(id: number): Promise<void> {
   return invoke("delete_account", { id });
 }

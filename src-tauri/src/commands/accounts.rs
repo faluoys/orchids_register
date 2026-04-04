@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use reqwest::blocking::ClientBuilder;
 use serde::Serialize;
-use tauri::State;
+use tauri::{Manager, State, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 use crate::db;
 use crate::orchids_profile;
@@ -57,6 +57,7 @@ fn normalize_client_cookie(raw: &str) -> Option<String> {
     } else {
         Some(normalized)
     }
+
 }
 
 fn normalize_optional_text(raw: Option<&str>) -> Option<String> {
@@ -81,6 +82,75 @@ fn build_profile_session_context(account: &db::Account) -> Option<orchids_profil
     } else {
         None
     }
+}
+
+struct CompletionCheckInput {
+    email: String,
+    password: String,
+    proxy: Option<String>,
+    existing_session: Option<orchids_profile::ExistingSessionContext>,
+}
+
+fn find_account_by_id(conn: &rusqlite::Connection, id: i64) -> Result<db::Account, String> {
+    db::get_all_accounts(conn, None, None)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|account| account.id == id)
+        .ok_or_else(|| "账号不存在".to_string())
+}
+
+fn load_completion_check_input(
+    state: &AppState,
+    id: i64,
+) -> Result<CompletionCheckInput, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let account = find_account_by_id(&conn, id)?;
+    let existing_session = build_profile_session_context(&account);
+    let proxy = db::get_all_config(&conn)
+        .ok()
+        .and_then(|config| config.get("proxy").cloned())
+        .filter(|value| !value.is_empty());
+
+    if account.password.trim().is_empty() && existing_session.is_none() {
+        return Err("该账号缺少密码，且没有可复用会话，无法继续检测补全状态".to_string());
+    }
+
+    Ok(CompletionCheckInput {
+        email: account.email,
+        password: account.password,
+        proxy,
+        existing_session,
+    })
+}
+
+#[cfg(test)]
+fn check_account_completion_with_fetcher<F>(
+    state: &AppState,
+    id: i64,
+    fetcher: F,
+) -> Result<db::Account, String>
+where
+    F: FnOnce(
+        &str,
+        &str,
+        i64,
+        Option<&str>,
+        Option<&orchids_profile::ExistingSessionContext>,
+    ) -> Result<orchids_profile::ProfileResult, String>,
+{
+    let input = load_completion_check_input(state, id)?;
+    let profile = fetcher(
+        &input.email,
+        &input.password,
+        30,
+        input.proxy.as_deref(),
+        input.existing_session.as_ref(),
+    )?;
+
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::update_account_plan_credits(&conn, id, profile.plan.as_deref(), profile.credits)
+        .map_err(|e| e.to_string())?;
+    find_account_by_id(&conn, id)
 }
 
 fn filter_accounts_by_ids(
@@ -571,6 +641,84 @@ pub async fn refresh_account_profile(
 }
 
 #[tauri::command]
+pub async fn check_account_completion(
+    state: State<'_, AppState>,
+    account_id: i64,
+) -> Result<db::Account, String> {
+    let input = load_completion_check_input(state.inner(), account_id)?;
+    let profile = tokio::task::spawn_blocking(move || {
+        orchids_profile::fetch_plan_and_credits_with_session(
+            &input.email,
+            &input.password,
+            30,
+            input.proxy.as_deref(),
+            input.existing_session.as_ref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("补全检测任务执行失败: {}", e))?
+    .map_err(|e| format!("补全检测失败: {}", e))?;
+
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::update_account_plan_credits(
+        &conn,
+        account_id,
+        profile.plan.as_deref(),
+        profile.credits,
+    )
+    .map_err(|e| e.to_string())?;
+    find_account_by_id(&conn, account_id)
+}
+
+#[tauri::command]
+pub async fn open_account_completion_window(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    account_id: i64,
+) -> Result<(), String> {
+    let account = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        find_account_by_id(&conn, account_id)?
+    };
+    let label = format!("account-completion-{}", account_id);
+
+    if let Some(window) = app.get_webview_window(&label) {
+        let _ = window.show();
+        let _ = window.set_focus();
+        return Ok(());
+    }
+
+    if state.has_completion_window(account_id)? {
+        state.clear_completion_window(account_id)?;
+    }
+    state.try_register_completion_window(account_id)?;
+
+    let target_url = Url::parse("https://www.orchids.app/")
+        .map_err(|e| format!("补全窗口 URL 无效: {}", e))?;
+
+    let window = WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(target_url))
+        .title(format!("继续补全: {}", account.email))
+        .inner_size(1280.0, 900.0)
+        .min_inner_size(960.0, 720.0)
+        .resizable(true)
+        .build()
+        .map_err(|e| {
+            let _ = state.clear_completion_window(account_id);
+            format!("打开补全窗口失败: {}", e)
+        })?;
+
+    let app_handle = app.clone();
+    window.on_window_event(move |event| {
+        if matches!(event, WindowEvent::Destroyed) {
+            let state = app_handle.state::<AppState>();
+            let _ = state.clear_completion_window(account_id);
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn delete_account(
     state: State<'_, AppState>,
     id: i64,
@@ -911,7 +1059,107 @@ mod tests {
         account.created_user_id = None;
 
         let context = build_profile_session_context(&account);
+        assert!(context.is_none(), "missing user_id/session_id should disable saved session reuse");
+    }
+}
 
-        assert!(context.is_none(), "缺少 user_id/session_id 时不应尝试复用会话");
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+    use crate::state::AppState;
+
+    fn insert_completion_candidate(state: &AppState, email: &str) -> i64 {
+        let conn = state.db.lock().expect("db lock should succeed");
+        let account_id = db::insert_account(
+            &conn,
+            &db::NewAccount {
+                email: email.to_string(),
+                password: "Secret123!".to_string(),
+                status: "complete".to_string(),
+                batch_id: None,
+                group_id: None,
+            },
+        )
+        .expect("account should insert");
+
+        db::update_account_result(
+            &conn,
+            account_id,
+            email,
+            Some("sua_completion"),
+            None,
+            true,
+            Some("sess_completion"),
+            Some("user_completion"),
+            Some("cookie_completion"),
+            Some("uat_completion"),
+            Some("jwt_completion"),
+            "complete",
+            None,
+        )
+        .expect("account result should update");
+
+        account_id
+    }
+
+    #[test]
+    fn completion_check_updates_account_on_success() {
+        let state = AppState::new().expect("state should initialize");
+        let account_id = insert_completion_candidate(&state, "completion-success@example.com");
+
+        let refreshed = check_account_completion_with_fetcher(
+            &state,
+            account_id,
+            |email, password, timeout, _proxy, existing_session| {
+                assert_eq!(email, "completion-success@example.com");
+                assert_eq!(password, "Secret123!");
+                assert_eq!(timeout, 30);
+                assert_eq!(
+                    existing_session,
+                    Some(&orchids_profile::ExistingSessionContext {
+                        session_id: Some("sess_completion".to_string()),
+                        user_id: Some("user_completion".to_string()),
+                        session_jwt: Some("jwt_completion".to_string()),
+                    })
+                );
+
+                Ok(orchids_profile::ProfileResult {
+                    plan: Some("PRO".to_string()),
+                    credits: Some(88),
+                })
+            },
+        )
+        .expect("completion check should succeed");
+
+        assert_eq!(refreshed.id, account_id);
+        assert_eq!(refreshed.plan.as_deref(), Some("PRO"));
+        assert_eq!(refreshed.credits, Some(88));
+    }
+
+    #[test]
+    fn completion_check_keeps_account_unchanged_on_failure() {
+        let state = AppState::new().expect("state should initialize");
+        let account_id = insert_completion_candidate(&state, "completion-failed@example.com");
+
+        let error = check_account_completion_with_fetcher(
+            &state,
+            account_id,
+            |_email, _password, _timeout, _proxy, _existing_session| {
+                Err("visitor verification still pending".to_string())
+            },
+        )
+        .expect_err("completion check should fail");
+
+        assert!(error.contains("visitor verification still pending"));
+
+        let conn = state.db.lock().expect("db lock should succeed");
+        let account = db::get_all_accounts(&conn, None, None)
+            .expect("accounts should load")
+            .into_iter()
+            .find(|account| account.id == account_id)
+            .expect("account should exist");
+
+        assert_eq!(account.plan, None);
+        assert_eq!(account.credits, None);
     }
 }
