@@ -1,6 +1,6 @@
-# Orchids Register 运行与构建指南
+# Orchids Register 运行与构建指北
 
-更新时间：2026-04-04
+更新时间：2026-04-05
 
 ## 1. 先记住当前推荐流程
 
@@ -16,22 +16,24 @@
 
 `runtime.local.yaml` 已经不是桌面主流程的前置步骤。
 
-## 2. 什么时候还需要 runtime YAML
+## 2. 什么情况下还需要 runtime YAML
 
-这两类文件和脚本仍然保留：
+这些文件和兼容脚本仍然保留：
 
 - `config/runtime.example.yaml`
 - `config/runtime.local.yaml`
-- `scripts/*.ps1`
-- `scripts/*.bat`
+- `scripts/run-cli-registration.ps1`
+- `scripts/run-cli-registration.bat`
+- `scripts/build-desktop.ps1`
+- `scripts/build-desktop.bat`
 
 它们只在这些场景仍然有用：
 
 - 你要跑 CLI
-- 你要单独调试旧脚本
+- 你要单独调试兼容脚本
 - 你要复现历史流程
 
-如果你只是使用桌面端，可以先不碰这些文件。
+如果你只使用桌面端，可以先不管这些文件。
 
 ## 3. 安装依赖
 
@@ -99,12 +101,12 @@ cargo tauri dev
 - `Mail Gateway`
 - `TurnstileSolver`
 
-现在推荐这样做，不再建议优先跑脚本。
+现在推荐这样做，不再建议优先跑旧脚本。
 
 ### 6.2 只做健康检查
 
 - `Mail Gateway` 页面可以直接点健康检查
-- `TurnstileSolver` 页面可以直接看服务状态和启动日志反馈
+- `TurnstileSolver` 页面可以直接查看服务状态和启动日志反馈
 
 ### 6.3 构建前端
 
@@ -122,18 +124,17 @@ cargo test -p orchids-auto-register-portable --lib -- --nocapture
 
 ## 7. 兼容脚本说明
 
-如果你确实要走旧脚本路径，可以看这些：
+如果你确实要走非桌面端的兼容路径，现在只保留这些：
 
-- `scripts/start-dev-stack.ps1`
-- `scripts/start-mail-gateway.ps1`
-- `scripts/start-turnstile-solver.ps1`
 - `scripts/run-cli-registration.ps1`
+- `scripts/build-desktop.ps1`
 
 但要注意：
 
 - 这些脚本属于兼容入口
 - 它们仍可能读取 `runtime.local.yaml`
 - 不应再把它们当成桌面版默认使用方式
+- `Mail Gateway` 和 `TurnstileSolver` 的启动与停止应优先在桌面端完成
 
 ## 8. 历史文档
 

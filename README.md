@@ -4,10 +4,10 @@
 
 当前推荐使用方式已经切换为：
 
-- 桌面端 Tauri UI 是主配置入口
+- 桌面端 `Tauri UI` 是主配置入口
 - `Mail Gateway` 和 `TurnstileSolver` 由桌面端直接管理
 - `runtime.local.yaml` 不再是桌面流程的必填配置
-- `runtime.*` 和 `scripts/*.ps1` 仍保留，用于 CLI / 旧脚本兼容路径
+- `runtime.*` 和少量 CLI 兼容脚本仍保留，用于非桌面端场景
 
 ## 当前主流程
 
@@ -28,14 +28,13 @@
 
 - `config/runtime.example.yaml`
 - `config/runtime.local.yaml`
-- `scripts/init-runtime-config.ps1`
-- `scripts/start-*.ps1`
 - `scripts/run-cli-registration.ps1`
+- `scripts/build-desktop.ps1`
 
 它们适合以下场景：
 
 - 你仍然使用 CLI 跑注册流程
-- 你需要脱离桌面端单独调试脚本
+- 你需要脱离桌面端单独调试兼容脚本
 - 你在排查旧环境或兼容历史用法
 
 ## 项目结构
@@ -45,7 +44,7 @@ orchids_register/
   config/           兼容旧脚本的 runtime YAML 模板
   docs/             运行、发布和历史设计文档
   mail-gateway/     邮箱网关服务
-  scripts/          兼容脚本与辅助启动命令
+  scripts/          兼容 CLI 的辅助脚本
   src/              Rust core / CLI
   src-tauri/        Tauri 桌面后端
   TurnstileSolver/  验证码求解服务
@@ -54,7 +53,7 @@ orchids_register/
 
 ## 环境准备
 
-建议在 Windows + PowerShell 下使用。
+建议在 `Windows + PowerShell` 下使用。
 
 ```powershell
 conda activate orchids-register
@@ -76,12 +75,12 @@ cargo tauri dev
 
 ## 文档入口
 
-- 当前运行说明：[`docs/run-build-guide.md`](docs/run-build-guide.md)
-- GitHub 提交说明：[`docs/github-publish-guide.md`](docs/github-publish-guide.md)
-- 历史设计 / 实现记录：[`docs/superpowers/`](docs/superpowers/)
+- 当前运行说明：[docs/run-build-guide.md](docs/run-build-guide.md)
+- GitHub 提交说明：[docs/github-publish-guide.md](docs/github-publish-guide.md)
+- 历史设计 / 实现记录：[docs/superpowers/](docs/superpowers/)
 
 ## 历史文档说明
 
-`docs/superpowers/specs` 和 `docs/superpowers/plans` 记录的是当时的设计和实施过程。
+`docs/superpowers/specs` 和 `docs/superpowers/plans` 记录的是当时的设计与实施过程。
 
-这些文档可以帮助你理解项目是怎么演进过来的，但它们不是当前的最终用户操作手册。
+这些文档可以帮助理解项目如何演进，但它们不是当前的最终操作手册。
