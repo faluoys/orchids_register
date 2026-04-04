@@ -39,3 +39,5 @@ mail-gateway/tests/.tmp*
 /zhuabao
 .worktrees/
 src-tauri/.codex-target/
+docs/superpowers/plans/
+docs/superpowers/specs/
