@@ -20,6 +20,7 @@ struct OrchidsApiImportAccount {
     client_uat: String,
     project_id: String,
     user_id: String,
+    desktop_jwt: String,
     agent_mode: String,
     email: String,
     weight: i32,
@@ -121,6 +122,7 @@ fn build_orchids_api_rows(accounts: &[db::Account]) -> Vec<OrchidsApiImportAccou
                 client_uat: client_uat.clone(),
                 project_id: ORCHIDS_API_DEFAULT_PROJECT_ID.to_string(),
                 user_id: user_id.to_string(),
+                desktop_jwt: account.desktop_jwt.clone().unwrap_or_default(),
                 agent_mode: ORCHIDS_API_DEFAULT_AGENT_MODE.to_string(),
                 email: account.email.clone(),
                 weight: 1,
@@ -551,6 +553,7 @@ mod tests {
             Some("280b7bae-cd29-41e4-a0a6-7f603c43b607")
         );
         assert_eq!(row.get("user_id").and_then(Value::as_str), Some("user_123"));
+        assert_eq!(row.get("desktop_jwt").and_then(Value::as_str), Some("jwt_123"));
         assert_eq!(row.get("agent_mode").and_then(Value::as_str), Some("claude-opus-4.5"));
         assert_eq!(row.get("email").and_then(Value::as_str), Some("demo@example.com"));
         assert_eq!(row.get("weight").and_then(Value::as_i64), Some(1));
