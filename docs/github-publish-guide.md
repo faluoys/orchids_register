@@ -1,48 +1,46 @@
 # GitHub 提交指南
 
-更新时间：2026-04-02
+更新时间：2026-04-04
 
-本文档用于把当前目录 `orchids_register` 初始化为一个新的 Git 仓库，并推送到 GitHub。
+## 1. 这份文档现在解决什么问题
 
-## 1. 提交前先确认什么不会被上传
+这份文档只负责一件事：
 
-当前本地敏感配置文件：
+- 帮你把当前仓库安全地提交到 GitHub
+
+它不是运行说明，也不是桌面配置说明。
+
+## 2. 提交前先确认哪些文件不该进仓库
+
+仍然需要重点保护的本地敏感配置：
 
 - `config/runtime.local.yaml`
 
-它已经在 [`.gitignore`](../.gitignore) 里，正常情况下不会被提交。
+虽然桌面端主流程现在不依赖这个文件，但它仍然可能包含：
 
-公开仓库里会保留这些文件：
+- 本地 API Key
+- 旧脚本兼容配置
+- 调试环境里的敏感参数
+
+所以它依然不应该上传到 GitHub。
+
+公开仓库通常会保留这些文件：
 
 - `config/runtime.example.yaml`
 - `docs/run-build-guide.md`
 - `scripts/*.ps1`
 - `scripts/*.bat`
 
-## 2. 首次初始化 Git 仓库
-
-在项目根目录执行：
-
-```powershell
-cd orchids_register
-git init
-git branch -M main
-```
-
-## 3. 先验证忽略规则是否生效
-
-执行：
+## 3. 提交前检查忽略规则
 
 ```powershell
 git status --short --ignored
 ```
 
-你应该重点确认：
+你要重点确认：
 
-- `config/runtime.local.yaml` 显示为 `!! config/runtime.local.yaml`
-- `config/runtime.example.yaml` 会显示为未跟踪文件，准备提交
-
-如果 `runtime.local.yaml` 没被忽略，先停下，不要提交。
+- `config/runtime.local.yaml` 显示为被忽略
+- 它没有出现在 staged 列表里
 
 也可以单独检查：
 
@@ -50,114 +48,57 @@ git status --short --ignored
 git check-ignore -v config/runtime.local.yaml
 ```
 
-## 4. 暂存并检查提交内容
+## 4. 如果误加了 runtime.local.yaml
 
-先执行：
-
-```powershell
-git add .
-git status --short
-```
-
-再次确认输出里**不要出现**：
-
-```powershell
-config/runtime.local.yaml
-```
-
-如果它真的出现在已暂存列表里，立刻执行：
+立刻把它从索引里移掉：
 
 ```powershell
 git rm --cached config/runtime.local.yaml
 ```
 
-然后再看一次：
+然后重新检查：
 
 ```powershell
 git status --short --ignored
 ```
 
-## 5. 提交
+## 5. 正常提交流程
 
 ```powershell
-git commit -m "feat: add mail gateway runtime config and startup scripts"
+git add .
+git status --short
+git commit -m "feat: update desktop workflow and config guidance"
 ```
 
-## 6. 在 GitHub 创建空仓库
-
-在 GitHub 网页上新建一个空仓库。
-
-要求：
-
-- 不要勾选 `Add a README`
-- 不要勾选 `.gitignore`
-- 不要勾选 `license`
-
-否则首次 push 会多一次处理远程历史的步骤。
-
-## 7. 绑定远程并推送
-
-把下面的 URL 改成你自己的 GitHub 仓库地址：
+## 6. 首次推送到 GitHub
 
 ```powershell
-git remote add origin https://github.com/<你的用户名>/<你的仓库名>.git
+git init
+git branch -M main
+git remote add origin https://github.com/<your-user>/<your-repo>.git
 git push -u origin main
 ```
 
-## 8. 如果远程仓库已经有内容
-
-如果你在 GitHub 上已经提前加了 README 或别的文件，就用这一组：
+如果远程仓库已经有内容：
 
 ```powershell
-git remote add origin https://github.com/<你的用户名>/<你的仓库名>.git
+git remote add origin https://github.com/<your-user>/<your-repo>.git
 git fetch origin
 git pull --rebase origin main --allow-unrelated-histories
 git push -u origin main
 ```
 
-如果 `origin` 已经存在，先改远程地址：
+## 7. 当前仓库文档层级
 
-```powershell
-git remote set-url origin https://github.com/<你的用户名>/<你的仓库名>.git
-```
+为了避免再把历史计划当成主说明，建议这样理解文档：
 
-## 9. 最短可执行命令清单
+- `README.md`：当前项目总入口
+- `docs/run-build-guide.md`：当前运行说明
+- `docs/github-publish-guide.md`：当前提交说明
+- `docs/superpowers/`：历史设计与实施记录
 
-如果你现在就要直接推，按这个顺序执行：
+## 8. 不要做的事
 
-```powershell
-cd orchids_register
-git init
-git branch -M main
-git status --short --ignored
-git add .
-git status --short
-git commit -m "feat: add mail gateway runtime config and startup scripts"
-git remote add origin https://github.com/<你的用户名>/<你的仓库名>.git
-git push -u origin main
-```
-
-## 10. 推送前最后检查
-
-在真正 `git push` 前，至少再看一次这两条：
-
-```powershell
-git status --short
-git status --short --ignored
-```
-
-你需要确保：
-
-- 没有把 `config/runtime.local.yaml` 加进去
-- 没有把测试结果文件误提交
-- 没有把你本机自己的额外敏感文件误提交
-
-## 11. 推荐做法
-
-推荐你长期保持这个习惯：
-
-- 把真实配置只写在 `config/runtime.local.yaml`
-- 把共享模板写在 `config/runtime.example.yaml`
-- 提交前先看一次 `git status --short --ignored`
-- 永远不要用 `git add -f config/runtime.local.yaml`
-
+- 不要把 `config/runtime.local.yaml` 强制提交
+- 不要把历史计划文档当成当前用户手册
+- 不要在提交前只看 UI，不检查 `git status`

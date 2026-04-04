@@ -1,146 +1,39 @@
-# Orchids Register 运行与打包指南
+# Orchids Register 运行与构建指南
 
-更新时间：2026-04-03
+更新时间：2026-04-04
 
-本文档已经切换为“优先改 YAML 配置文件，再执行脚本”的方式。
+## 1. 先记住当前推荐流程
 
-## 1. 新增文件
+桌面端现在是主配置入口。
 
-本次新增了这些文件：
+如果你使用 Tauri 桌面版，推荐顺序是：
 
-- `config/runtime.example.yaml`：配置模板
-- `config/runtime.local.yaml`：本地实际配置，优先读取，已加入 `.gitignore`
-- `scripts/common.ps1`：脚本公共函数
-- `scripts/init-runtime-config.ps1`：显式生成或覆盖 `runtime.local.yaml`
-- `scripts/start-mail-gateway.ps1`：启动邮箱网关
-- `scripts/start-turnstile-solver.ps1`：启动验证码求解服务
-- `scripts/start-desktop-dev.ps1`：启动桌面开发模式
-- `scripts/start-dev-stack.ps1`：一键启动开发全套
-- `scripts/build-desktop.ps1`：一键打包桌面应用
-- `scripts/run-cli-registration.ps1`：按 YAML 配置执行一次 CLI 注册验证
-- `scripts/init-runtime-config.bat`：PowerShell 初始化脚本包装
-- `scripts/start-dev-stack.bat`：PowerShell 启动器包装
-- `scripts/build-desktop.bat`：PowerShell 打包器包装
-- `scripts/run-cli-registration.bat`：PowerShell CLI 验证包装
-- `.taurignore`：Tauri dev watcher 忽略规则，避免网关层变化触发桌面开发模式重载
+1. 安装依赖
+2. 启动桌面端
+3. 在桌面配置页面里填写运行参数和 API Key
+4. 在桌面里启动 `Mail Gateway` 和 `TurnstileSolver`
+5. 直接从桌面执行注册和测试
 
-## 2. 配置文件说明
+`runtime.local.yaml` 已经不是桌面主流程的前置步骤。
 
-主配置文件：
+## 2. 什么时候还需要 runtime YAML
 
-- [runtime.local.yaml](../config/runtime.local.yaml)
+这两类文件和脚本仍然保留：
 
-模板文件：
+- `config/runtime.example.yaml`
+- `config/runtime.local.yaml`
+- `scripts/*.ps1`
+- `scripts/*.bat`
 
-- [runtime.example.yaml](../config/runtime.example.yaml)
+它们只在这些场景仍然有用：
 
-脚本读取顺序：
+- 你要跑 CLI
+- 你要单独调试旧脚本
+- 你要复现历史流程
 
-1. `config/runtime.local.yaml`
-2. `config/runtime.example.yaml`
+如果你只是使用桌面端，可以先不碰这些文件。
 
-也就是说，你平时只需要改 `runtime.local.yaml`。
-
-### 2.1 自动生成规则
-
-现在开始，你不需要手动复制模板。
-
-当下面任意脚本执行时：
-
-- `init-runtime-config.ps1`
-- `start-mail-gateway.ps1`
-- `start-turnstile-solver.ps1`
-- `start-desktop-dev.ps1`
-- `start-dev-stack.ps1`
-- `build-desktop.ps1`
-- `run-cli-registration.ps1`
-
-如果 `config/runtime.local.yaml` 不存在，脚本会自动从 `config/runtime.example.yaml` 生成一份本地配置。
-
-如果你想显式初始化：
-
-```powershell
-cd orchids_register
-.\scripts\init-runtime-config.ps1
-```
-
-如果你想强制覆盖已有本地配置：
-
-```powershell
-.\scripts\init-runtime-config.ps1 -Force
-```
-
-### 2.2 你必须先改的字段
-
-先打开 [runtime.local.yaml](../config/runtime.local.yaml)，至少确认这些值：
-
-```yaml
-conda_env: orchids-register
-
-mail_gateway:
-  host: 127.0.0.1
-  port: 8081
-  database_path: mail-gateway/data/mail_gateway.db
-  luckmail_base_url: https://mails.luckyous.com
-  luckmail_api_key: REPLACE_WITH_REAL_LUCKMAIL_KEY
-  yyds_base_url: https://maliapi.215.im/v1
-  yyds_api_key: REPLACE_WITH_REAL_YYDS_KEY
-
-turnstile_solver:
-  host: 127.0.0.1
-  port: 5000
-  thread: 2
-  browser_type: chromium
-  headless: true
-  debug: false
-  proxy: false
-  random: false
-
-orchids:
-  mail_mode: gateway
-  mail_gateway_base_url: http://127.0.0.1:8081
-  mail_provider: yyds_mail
-  mail_provider_mode: persistent
-  mail_project_code: orchids
-  mail_domain: hotmail.com
-  poll_timeout: 180
-  poll_interval: 2
-  captcha_api_url: http://127.0.0.1:5000
-  result_json: register_result.json
-```
-
-最重要的是：
-
-- 你要用 YYDS 时，把 `yyds_api_key` 改成真实 Key，并把 `orchids.mail_provider` 设成 `yyds_mail`
-- 你要用 LuckMail 时，把 `luckmail_api_key` 改成真实 Key，并把 `orchids.mail_provider` 设成 `luckmail`
-- YYDS 对应 `orchids.mail_provider_mode = persistent`
-- LuckMail 对应 `orchids.mail_provider_mode = purchased`
-- 如果你想固定域名后缀，可以填 `orchids.mail_domain`，例如 `hotmail.com`、`outlook.com`
-- 如果你想改端口，也要同步改 `orchids.mail_gateway_base_url`
-
-### 2.3 YAML 使用限制
-
-当前脚本里的 YAML 解析器是我为这个项目写的简化版，所以请按现有格式改，不要超出这个范围。
-
-允许：
-
-- 顶层键值
-- 一级 section
-- section 里再写简单键值
-- 布尔值 `true/false`
-- 数字
-- 字符串
-
-不要这样写：
-
-- 行内注释，例如 `port: 8081 # 注释`
-- 数组
-- 多级嵌套
-- 复杂 YAML 语法
-
-## 3. 一次性准备
-
-第一次使用这台机器时，先执行：
+## 3. 安装依赖
 
 ```powershell
 conda activate orchids-register
@@ -151,291 +44,97 @@ cd .\ui
 npm install
 ```
 
-## 4. 最短使用方式
-
-### 4.1 一键初始化本地配置
+## 4. 启动桌面开发
 
 ```powershell
 cd orchids_register
-.\scripts\init-runtime-config.ps1
-```
-
-### 4.2 一键启动开发全套
-
-PowerShell：
-
-```powershell
-cd orchids_register
-.\scripts\start-dev-stack.ps1
-```
-
-BAT：
-
-```powershell
-cd orchids_register
-.\scripts\start-dev-stack.bat
-```
-
-这个脚本会分别打开 3 个窗口：
-
-- `mail-gateway`
-- `TurnstileSolver`
-- `cargo tauri dev`
-
-### 4.3 一键打包桌面应用
-
-PowerShell：
-
-```powershell
-cd orchids_register
-.\scripts\build-desktop.ps1
-```
-
-BAT：
-
-```powershell
-cd orchids_register
-.\scripts\build-desktop.bat
-```
-
-### 4.4 一键执行一次 CLI 注册验证
-
-PowerShell：
-
-```powershell
-cd orchids_register
-.\scripts\run-cli-registration.ps1
-```
-
-BAT：
-
-```powershell
-cd orchids_register
-.\scripts\run-cli-registration.bat
-```
-
-结果文件默认输出到：
-
-```powershell
-.\register_result.json
-```
-
-## 5. 单独启动某个部分
-
-### 5.1 单独初始化配置
-
-```powershell
-cd orchids_register
-.\scripts\init-runtime-config.ps1
-```
-
-### 5.2 单独启动 mail-gateway
-
-```powershell
-cd orchids_register
-.\scripts\start-mail-gateway.ps1
-```
-
-这个脚本会自动把下面这些环境变量注入到当前进程里：
-
-- `MAIL_GATEWAY_DB`
-- `LUCKMAIL_BASE_URL`
-- `LUCKMAIL_API_KEY`
-- `YYDS_BASE_URL`
-- `YYDS_API_KEY`
-
-### 5.3 单独启动 TurnstileSolver
-
-```powershell
-cd orchids_register
-.\scripts\start-turnstile-solver.ps1
-```
-
-### 5.4 单独启动桌面开发模式
-
-```powershell
-cd orchids_register
-.\scripts\start-desktop-dev.ps1
-```
-
-## 6. 不直接启动，只看脚本会执行什么
-
-每个 PowerShell 脚本都支持 `-DryRun`。
-
-例如：
-
-```powershell
-cd orchids_register
-.\scripts\init-runtime-config.ps1 -DryRun
-.\scripts\start-mail-gateway.ps1 -DryRun
-.\scripts\start-turnstile-solver.ps1 -DryRun
-.\scripts\start-desktop-dev.ps1 -DryRun
-.\scripts\start-dev-stack.ps1 -DryRun
-.\scripts\build-desktop.ps1 -DryRun
-.\scripts\run-cli-registration.ps1 -DryRun
-```
-
-这会打印最终动作，但不会真正启动进程。
-
-## 7. 手动命令兜底
-
-如果你不想用脚本，也可以按下面的手动命令执行。
-
-### 7.1 启动 mail-gateway
-
-更推荐直接用脚本，因为脚本会自动注入 LuckMail / YYDS 环境变量。
-
-```powershell
-cd orchids_register
-.\scripts\start-mail-gateway.ps1
-```
-
-### 7.2 启动 TurnstileSolver
-
-```powershell
-conda activate orchids-register
-cd orchids_register
-cd .\TurnstileSolver
-python api_solver.py --host 127.0.0.1 --port 5000 --thread 2 --browser_type chromium
-```
-
-### 7.3 桌面开发模式
-
-```powershell
-cd orchids_register
-cd .\src-tauri
 cargo tauri dev
 ```
 
-### 7.4 正式打包
+启动后主要在两个页面完成配置：
 
-```powershell
-cd orchids_register
-cd .\src-tauri
-cargo tauri build
-```
+- `Mail Gateway` 页面
+- `系统设置 / TurnstileSolver` 页面
 
-## 8. 产物位置
+## 5. 桌面端首次配置建议
 
-桌面打包产物通常在：
+### 5.1 Mail Gateway
 
-```powershell
-.\target\release\bundle
-```
+至少确认这些值：
 
-CLI 验证结果默认在：
+- `Host`
+- `Port`
+- `Database Path`
+- 对应供应商的 `API Key`
+- `mail_provider`
+- `mail_provider_mode`
 
-```powershell
-.\register_result.json
-```
+常见情况：
 
-mail-gateway 数据库默认在：
+- 用 `LuckMail` 时，重点检查 `luckmail_api_key`
+- 用 `YYDS` 时，重点检查 `yyds_api_key`
 
-```powershell
-.\mail-gateway\data\mail_gateway.db
-```
+### 5.2 TurnstileSolver
 
-## 9. 排查顺序
-
-如果你点击脚本后失败，按这个顺序查。
-
-### 9.1 先看配置文件
-
-确认 [runtime.local.yaml](../config/runtime.local.yaml) 里至少这几个值没写错：
+至少确认这些值：
 
 - `conda_env`
-- `mail_gateway.host`
-- `mail_gateway.port`
-- `mail_gateway.luckmail_api_key`
-- `mail_gateway.yyds_api_key`
-- `turnstile_solver.port`
-- `orchids.mail_gateway_base_url`
-- `orchids.mail_provider`
-- `orchids.mail_provider_mode`
+- `Host`
+- `Port`
+- `Thread`
+- `browser_type`
 
-### 9.2 再跑 DryRun
+如果启动失败，先看：
 
-```powershell
-.\scripts\start-dev-stack.ps1 -DryRun
-```
+- Conda 环境名是否正确
+- 端口是否被别的程序占用
+- `TurnstileSolver` 依赖是否已经安装
 
-### 9.3 再单独跑各组件
+## 6. 常见操作
 
-```powershell
-.\scripts\start-mail-gateway.ps1
-```
+### 6.1 启动桌面后端服务
 
-```powershell
-.\scripts\start-turnstile-solver.ps1
-```
+在桌面端中直接启动：
 
-```powershell
-.\scripts\start-desktop-dev.ps1
-```
+- `Mail Gateway`
+- `TurnstileSolver`
 
-### 9.4 最后再打包
+现在推荐这样做，不再建议优先跑脚本。
+
+### 6.2 只做健康检查
+
+- `Mail Gateway` 页面可以直接点健康检查
+- `TurnstileSolver` 页面可以直接看服务状态和启动日志反馈
+
+### 6.3 构建前端
 
 ```powershell
-.\scripts\build-desktop.ps1
-```
-
-## 10. 常见问题
-
-### 10.1 `runtime.local.yaml` 不存在
-
-现在脚本会自动生成它。
-
-你也可以手动执行：
-
-```powershell
-.\scripts\init-runtime-config.ps1
-```
-
-### 10.2 `/health` 里 provider 不是 `enabled`
-
-大概率是 [runtime.local.yaml](../config/runtime.local.yaml) 里的真实 Key 还没填对。
-
-- `luckmail` 取决于 `mail_gateway.luckmail_api_key`
-- `yyds_mail` 取决于 `mail_gateway.yyds_api_key`
-
-### 10.3 YYDS 已经 release，但远端邮箱还在
-
-这是当前设计里的正常行为。
-
-YYDS 走的是持久邮箱模式，`mail-gateway` 删除 session 时只清本地会话，不会主动删除远端收件箱。
-
-### 10.4 一键脚本打开了窗口，但服务没起来
-
-先看新窗口里打印的实际命令，再单独执行对应 `.ps1`。
-
-### 10.5 点击开始注册后，`cargo tauri dev` 看起来像重启了一次
-
-现在仓库根目录已经新增 `.taurignore`，默认忽略 `mail-gateway/**`。
-
-也就是说，网关数据库 `mail-gateway/data/mail_gateway.db` 发生变化时，不会再触发 Tauri 开发模式自动重载。
-
-如果你已经开着 `cargo tauri dev`，在新增 `.taurignore` 后请手动重启一次桌面开发窗口。
-
-### 10.6 `cargo tauri build` 失败
-
-先拆开执行：
-
-```powershell
-cd orchids_register
-cd .\ui
+cd orchids_register\ui
 npm run build
 ```
 
+### 6.4 运行 Rust 后端测试
+
 ```powershell
 cd orchids_register
-cargo check -p orchids-auto-register-portable
+cargo test -p orchids-auto-register-portable --lib -- --nocapture
 ```
 
-### 10.7 我不想碰 PowerShell，只想双击
+## 7. 兼容脚本说明
 
-直接双击：
+如果你确实要走旧脚本路径，可以看这些：
 
-- `scripts\init-runtime-config.bat`
-- `scripts\start-dev-stack.bat`
-- `scripts\build-desktop.bat`
-- `scripts\run-cli-registration.bat`
+- `scripts/start-dev-stack.ps1`
+- `scripts/start-mail-gateway.ps1`
+- `scripts/start-turnstile-solver.ps1`
+- `scripts/run-cli-registration.ps1`
+
+但要注意：
+
+- 这些脚本属于兼容入口
+- 它们仍可能读取 `runtime.local.yaml`
+- 不应再把它们当成桌面版默认使用方式
+
+## 8. 历史文档
+
+`docs/superpowers/` 目录保存的是设计稿和实施计划，主要用于追溯历史决策，不是当前操作手册。

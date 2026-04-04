@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 use crate::capmonster::{discover_turnstile_sitekey, solve_turnstile_with_local_api};
 use crate::clerk::{
-    attempt_email_verification, create_sign_up, extract_client_cookie, extract_signup_id, init_clerk_environment,
+    attempt_email_verification, create_sign_up, extract_client_cookie, extract_client_uat, extract_signup_id, init_clerk_environment,
     pick_summary_fields, prepare_email_verification,
 };
 use crate::cli::{parse_args, Args};
@@ -38,6 +38,7 @@ pub struct RegistrationResult {
     pub created_session_id: Option<String>,
     pub created_user_id: Option<String>,
     pub client_cookie: Option<String>,
+    pub client_uat: Option<String>,
     pub desktop_touch_ok: Option<bool>,
     pub desktop_tokens_ok: Option<bool>,
     pub desktop_session_usable: Option<bool>,
@@ -188,6 +189,7 @@ fn run_with_args_internal<F: Fn(LogEntry)>(args: Args, shared_proxy_pool: Option
             created_session_id: None,
             created_user_id: None,
             client_cookie: None,
+            client_uat: None,
             desktop_touch_ok: None,
             desktop_tokens_ok: None,
             desktop_session_usable: None,
@@ -203,6 +205,7 @@ fn run_with_args_internal<F: Fn(LogEntry)>(args: Args, shared_proxy_pool: Option
             "created_session_id": Value::Null,
             "created_user_id": Value::Null,
             "client_cookie": Value::Null,
+            "client_uat": Value::Null,
             "desktop_session_test": Value::Null,
         });
 
@@ -518,6 +521,15 @@ fn run_with_args_internal<F: Fn(LogEntry)>(args: Args, shared_proxy_pool: Option
         obj.insert(
             "client_cookie".to_string(),
             client_cookie.clone().map(Value::String).unwrap_or(Value::Null),
+        );
+    }
+
+    let client_uat = extract_client_uat(&cookie_store);
+    result.client_uat = client_uat.clone();
+    if let Some(obj) = result_payload.as_object_mut() {
+        obj.insert(
+            "client_uat".to_string(),
+            client_uat.clone().map(Value::String).unwrap_or(Value::Null),
         );
     }
 

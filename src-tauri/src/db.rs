@@ -14,6 +14,7 @@ pub struct Account {
     pub created_session_id: Option<String>,
     pub created_user_id: Option<String>,
     pub client_cookie: Option<String>,
+    pub client_uat: Option<String>,
     pub desktop_jwt: Option<String>,
     pub status: String,
     pub error_message: Option<String>,
@@ -63,6 +64,7 @@ pub fn init_db() -> Result<Connection> {
             created_session_id      TEXT,
             created_user_id         TEXT,
             client_cookie           TEXT,
+            client_uat              TEXT,
             desktop_jwt             TEXT,
             status                  TEXT DEFAULT 'pending' CHECK(status IN ('pending','running','complete','failed')),
             error_message           TEXT,
@@ -102,6 +104,7 @@ pub fn init_db() -> Result<Connection> {
     ensure_table_column(&conn, "accounts", "plan", "TEXT")?;
     ensure_table_column(&conn, "accounts", "credits", "INTEGER")?;
     ensure_table_column(&conn, "accounts", "group_id", "INTEGER")?;
+    ensure_table_column(&conn, "accounts", "client_uat", "TEXT")?;
     ensure_table_column(&conn, "account_groups", "pinned", "INTEGER DEFAULT 0")?;
     ensure_table_column(&conn, "account_groups", "is_default", "INTEGER DEFAULT 0")?;
     ensure_table_column(&conn, "account_groups", "sort_order", "INTEGER DEFAULT 0")?;
@@ -186,6 +189,7 @@ fn prune_legacy_accounts_columns(conn: &Connection) -> Result<()> {
             created_session_id      TEXT,
             created_user_id         TEXT,
             client_cookie           TEXT,
+            client_uat              TEXT,
             desktop_jwt             TEXT,
             status                  TEXT DEFAULT 'pending' CHECK(status IN ('pending','running','complete','failed')),
             error_message           TEXT,
@@ -199,12 +203,12 @@ fn prune_legacy_accounts_columns(conn: &Connection) -> Result<()> {
 
          INSERT INTO accounts__new (
             id, email, password, sign_up_id, email_code, register_complete,
-            created_session_id, created_user_id, client_cookie, desktop_jwt,
+            created_session_id, created_user_id, client_cookie, client_uat, desktop_jwt,
             status, error_message, batch_id, group_id, plan, credits, created_at, updated_at
          )
          SELECT
             id, email, password, sign_up_id, email_code, register_complete,
-            created_session_id, created_user_id, client_cookie, desktop_jwt,
+            created_session_id, created_user_id, client_cookie, client_uat, desktop_jwt,
             status, error_message, batch_id, group_id, plan, credits, created_at, updated_at
          FROM accounts;
 
@@ -350,6 +354,7 @@ pub fn update_account_result(
     created_session_id: Option<&str>,
     created_user_id: Option<&str>,
     client_cookie: Option<&str>,
+    client_uat: Option<&str>,
     desktop_jwt: Option<&str>,
     status: &str,
     error_message: Option<&str>,
@@ -363,9 +368,10 @@ pub fn update_account_result(
             created_session_id = ?6,
             created_user_id = ?7,
             client_cookie = ?8,
-            desktop_jwt = ?9,
-            status = ?10,
-            error_message = ?11,
+            client_uat = ?9,
+            desktop_jwt = ?10,
+            status = ?11,
+            error_message = ?12,
             updated_at = datetime('now','localtime')
          WHERE id = ?1",
         params![
@@ -377,6 +383,7 @@ pub fn update_account_result(
             created_session_id,
             created_user_id,
             client_cookie,
+            client_uat,
             desktop_jwt,
             status,
             error_message,
@@ -400,6 +407,7 @@ pub fn get_all_accounts(
             a.created_session_id,
             a.created_user_id,
             a.client_cookie,
+            a.client_uat,
             a.desktop_jwt,
             a.status,
             a.error_message,
@@ -443,16 +451,17 @@ pub fn get_all_accounts(
             created_session_id: row.get(6)?,
             created_user_id: row.get(7)?,
             client_cookie: row.get(8)?,
-            desktop_jwt: row.get(9)?,
-            status: row.get(10)?,
-            error_message: row.get(11)?,
-            batch_id: row.get(12)?,
-            plan: row.get(13)?,
-            credits: row.get(14)?,
-            created_at: row.get(15)?,
-            updated_at: row.get(16)?,
-            group_id: row.get(17)?,
-            group_name: row.get(18)?,
+            client_uat: row.get(9)?,
+            desktop_jwt: row.get(10)?,
+            status: row.get(11)?,
+            error_message: row.get(12)?,
+            batch_id: row.get(13)?,
+            plan: row.get(14)?,
+            credits: row.get(15)?,
+            created_at: row.get(16)?,
+            updated_at: row.get(17)?,
+            group_id: row.get(18)?,
+            group_name: row.get(19)?,
         })
     })?;
 

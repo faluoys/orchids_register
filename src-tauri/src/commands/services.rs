@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use tauri::State;
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::db;
 use crate::service_manager::{
@@ -8,6 +9,29 @@ use crate::service_manager::{
     build_turnstile_solver_spec, repo_root, ServiceManager, ServiceStatus,
 };
 use crate::state::AppState;
+
+const SERVICE_STATUS_UPDATED_EVENT: &str = "service-status-updated";
+
+#[derive(Clone, Serialize)]
+struct ServiceStatusChangedEvent {
+    service: &'static str,
+    status: ServiceStatus,
+}
+
+fn emit_service_status(
+    app: &AppHandle,
+    service: &'static str,
+    status: &ServiceStatus,
+) {
+    let _ = app.emit_to(
+        "main",
+        SERVICE_STATUS_UPDATED_EVENT,
+        ServiceStatusChangedEvent {
+            service,
+            status: status.clone(),
+        },
+    );
+}
 
 fn load_config(state: &State<'_, AppState>) -> Result<HashMap<String, String>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -39,17 +63,21 @@ pub async fn get_service_status(
 
 #[tauri::command]
 pub async fn start_mail_gateway(
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ServiceStatus, String> {
     let config = load_config(&state)?;
     let repo_root = repo_root_string()?;
     let spec = build_mail_gateway_spec(&config, &repo_root)?;
     let mut manager = state.services.lock().map_err(|e| e.to_string())?;
-    manager.start_mail_gateway(spec)
+    let status = manager.start_mail_gateway(spec)?;
+    emit_service_status(&app, crate::service_manager::MAIL_GATEWAY_SERVICE, &status);
+    Ok(status)
 }
 
 #[tauri::command]
 pub async fn stop_mail_gateway(
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ServiceStatus, String> {
     let config = load_config(&state).ok();
@@ -57,22 +85,28 @@ pub async fn stop_mail_gateway(
         .as_ref()
         .and_then(|items| build_mail_gateway_probe_target(items).ok());
     let mut manager = state.services.lock().map_err(|e| e.to_string())?;
-    manager.stop_mail_gateway(probe_target)
+    let status = manager.stop_mail_gateway(probe_target)?;
+    emit_service_status(&app, crate::service_manager::MAIL_GATEWAY_SERVICE, &status);
+    Ok(status)
 }
 
 #[tauri::command]
 pub async fn start_turnstile_solver(
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ServiceStatus, String> {
     let config = load_config(&state)?;
     let repo_root = repo_root_string()?;
     let spec = build_turnstile_solver_spec(&config, &repo_root)?;
     let mut manager = state.services.lock().map_err(|e| e.to_string())?;
-    manager.start_turnstile_solver(spec)
+    let status = manager.start_turnstile_solver(spec)?;
+    emit_service_status(&app, crate::service_manager::TURNSTILE_SOLVER_SERVICE, &status);
+    Ok(status)
 }
 
 #[tauri::command]
 pub async fn stop_turnstile_solver(
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ServiceStatus, String> {
     let config = load_config(&state).ok();
@@ -80,7 +114,13 @@ pub async fn stop_turnstile_solver(
         .as_ref()
         .and_then(|items| build_turnstile_solver_probe_target(items).ok());
     let mut manager = state.services.lock().map_err(|e| e.to_string())?;
-    manager.stop_turnstile_solver(probe_target)
+    let status = manager.stop_turnstile_solver(probe_target)?;
+    emit_service_status(
+        &app,
+        crate::service_manager::TURNSTILE_SOLVER_SERVICE,
+        &status,
+    );
+    Ok(status)
 }
 
 #[cfg(test)]

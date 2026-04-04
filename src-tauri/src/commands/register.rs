@@ -267,6 +267,7 @@ pub async fn start_registration(
                     reg_result.created_session_id.as_deref(),
                     reg_result.created_user_id.as_deref(),
                     reg_result.client_cookie.as_deref(),
+                    reg_result.client_uat.as_deref(),
                     reg_result.desktop_jwt.as_deref(),
                     "complete",
                     None,
@@ -449,6 +450,7 @@ pub async fn start_batch_registration(
                                     reg_result.created_session_id.as_deref(),
                                     reg_result.created_user_id.as_deref(),
                                     reg_result.client_cookie.as_deref(),
+                                    reg_result.client_uat.as_deref(),
                                     reg_result.desktop_jwt.as_deref(),
                                     "complete",
                                     None,
@@ -558,7 +560,7 @@ pub async fn cancel_batch(state: State<'_, AppState>) -> Result<(), String> {
 mod tests {
     use super::{validate_desktop_preflight, RegisterArgs};
     use crate::service_manager::{
-        ServiceStatus, MAIL_GATEWAY_SERVICE, TURNSTILE_SOLVER_SERVICE,
+        ServiceSource, ServiceStatus, MAIL_GATEWAY_SERVICE, TURNSTILE_SOLVER_SERVICE,
     };
     use std::collections::HashMap;
 
@@ -600,6 +602,7 @@ mod tests {
             pid: Some(1234),
             last_started_at: Some("2026-04-03 21:00:00".to_string()),
             last_error: None,
+            source: ServiceSource::DesktopManaged,
         }
     }
 

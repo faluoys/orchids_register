@@ -1,5 +1,14 @@
-import { useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { useCallback, useEffect, useState } from "react";
 import { LayoutDashboard, Mail, Settings, UserPlus, Users, FolderTree, Inbox } from "lucide-react";
+import CloseAppDialog from "./components/CloseAppDialog";
+import {
+  cancelClosePrompt,
+  confirmExit,
+  getServiceStatus,
+  stopMailGateway,
+  stopTurnstileSolver,
+} from "./lib/tauri-api";
 import DashboardPage from "./pages/DashboardPage";
 import RegisterPage from "./pages/RegisterPage";
 import AccountsPage from "./pages/AccountsPage";
@@ -7,7 +16,7 @@ import GroupManagePage from "./pages/GroupManagePage";
 import DomainManagePage from "./pages/DomainManagePage";
 import InboxConfigPage from "./pages/InboxConfigPage";
 import SettingsPage from "./pages/SettingsPage";
-import type { Page } from "./lib/types";
+import type { ManagedServiceName, Page, ServiceStatus } from "./lib/types";
 
 const navItems: { id: Page; label: string; icon: string; Icon: typeof UserPlus }[] = [
   { id: "dashboard", label: "仪表盘", icon: "\uD83D\uDCCA", Icon: LayoutDashboard },
@@ -21,6 +30,86 @@ const navItems: { id: Page; label: string; icon: string; Icon: typeof UserPlus }
 
 export default function App() {
   const [currentPage, setCurrentPage] = useState<Page>("register");
+  const [closeDialogOpen, setCloseDialogOpen] = useState(false);
+  const [closeDialogLoading, setCloseDialogLoading] = useState(false);
+  const [closeDialogError, setCloseDialogError] = useState<string | null>(null);
+  const [closeDialogBusyService, setCloseDialogBusyService] = useState<ManagedServiceName | null>(null);
+  const [closeDialogServices, setCloseDialogServices] = useState<
+    Record<ManagedServiceName, ServiceStatus | null>
+  >({
+    mail_gateway: null,
+    turnstile_solver: null,
+  });
+
+  const refreshCloseDialogServices = useCallback(async () => {
+    setCloseDialogLoading(true);
+    setCloseDialogError(null);
+    try {
+      const statuses = await getServiceStatus();
+      setCloseDialogServices({
+        mail_gateway: statuses.mail_gateway,
+        turnstile_solver: statuses.turnstile_solver,
+      });
+    } catch (error) {
+      setCloseDialogError(String(error));
+    } finally {
+      setCloseDialogLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void listen("app-close-requested", async () => {
+      if (disposed) return;
+      setCloseDialogOpen(true);
+      await refreshCloseDialogServices();
+    }).then((handler) => {
+      unlisten = handler;
+    });
+
+    return () => {
+      disposed = true;
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, [refreshCloseDialogServices]);
+
+  const handleCloseDialogCancel = useCallback(async () => {
+    try {
+      await cancelClosePrompt();
+    } finally {
+      setCloseDialogBusyService(null);
+      setCloseDialogError(null);
+      setCloseDialogOpen(false);
+    }
+  }, []);
+
+  const handleCloseDialogStopService = useCallback(async (service: ManagedServiceName) => {
+    setCloseDialogBusyService(service);
+    setCloseDialogError(null);
+    try {
+      if (service === "mail_gateway") {
+        const status = await stopMailGateway();
+        setCloseDialogServices((current) => ({ ...current, mail_gateway: status }));
+      } else {
+        const status = await stopTurnstileSolver();
+        setCloseDialogServices((current) => ({ ...current, turnstile_solver: status }));
+      }
+      await refreshCloseDialogServices();
+    } catch (error) {
+      setCloseDialogError(String(error));
+      await refreshCloseDialogServices();
+    } finally {
+      setCloseDialogBusyService(null);
+    }
+  }, [refreshCloseDialogServices]);
+
+  const handleCloseDialogExit = useCallback(async () => {
+    await confirmExit();
+  }, []);
 
   return (
     <div className="app-layout">
@@ -81,6 +170,17 @@ export default function App() {
           <SettingsPage />
         </div>
       </main>
+
+      <CloseAppDialog
+        open={closeDialogOpen}
+        loading={closeDialogLoading}
+        services={closeDialogServices}
+        busyService={closeDialogBusyService}
+        error={closeDialogError}
+        onStopService={(service) => void handleCloseDialogStopService(service)}
+        onCancel={() => void handleCloseDialogCancel()}
+        onExit={() => void handleCloseDialogExit()}
+      />
     </div>
   );
 }

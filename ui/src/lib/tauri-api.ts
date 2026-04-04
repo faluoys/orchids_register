@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type {
   Account,
   AccountGroup,
@@ -8,6 +9,11 @@ import type {
   RegisterArgs,
   ServiceStatus,
 } from "./types";
+
+export interface ServiceStatusChangedEvent {
+  service: ManagedServiceName;
+  status: ServiceStatus;
+}
 
 // Register
 export async function startRegistration(args: RegisterArgs): Promise<string> {
@@ -155,4 +161,20 @@ export async function startTurnstileSolver(): Promise<ServiceStatus> {
 
 export async function stopTurnstileSolver(): Promise<ServiceStatus> {
   return invoke("stop_turnstile_solver");
+}
+
+export async function cancelClosePrompt(): Promise<void> {
+  return invoke("cancel_close_prompt");
+}
+
+export async function confirmExit(): Promise<void> {
+  return invoke("confirm_exit");
+}
+
+export async function onServiceStatusChanged(
+  handler: (event: ServiceStatusChangedEvent) => void | Promise<void>
+): Promise<() => void> {
+  return listen<ServiceStatusChangedEvent>("service-status-updated", async (event) => {
+    await handler(event.payload);
+  });
 }
