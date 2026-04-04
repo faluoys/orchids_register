@@ -59,7 +59,7 @@ class MailChatGPTUKProvider(InboxProvider):
         after_ts_ms = _to_timestamp_ms(after_ts) if after_ts is not None else None
 
         while time.time() < deadline:
-            messages = self._request_json_list(
+            messages = self._request_email_messages(
                 'GET',
                 '/api/emails',
                 params={'email': upstream_token},
@@ -134,7 +134,7 @@ class MailChatGPTUKProvider(InboxProvider):
             raise RuntimeError(f'MailChatGPT UK request failed: {path} returned non-dict payload: {payload!r}')
         return payload
 
-    def _request_json_list(
+    def _request_email_messages(
         self,
         method: str,
         path: str,
@@ -143,9 +143,13 @@ class MailChatGPTUKProvider(InboxProvider):
         json: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         payload = self._request_json(method, path, params=params, json=json)
-        if not isinstance(payload, list):
-            raise RuntimeError(f'MailChatGPT UK request failed: {path} returned non-list payload: {payload!r}')
-        return [item for item in payload if isinstance(item, dict)]
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if isinstance(payload, dict):
+            emails = payload.get('emails')
+            if isinstance(emails, list):
+                return [item for item in emails if isinstance(item, dict)]
+        raise RuntimeError(f'MailChatGPT UK request failed: {path} returned non-list payload: {payload!r}')
 
     def _url(self, path: str) -> str:
         return f'{self.base_url}/{path.lstrip("/")}'
@@ -174,13 +178,13 @@ def _normalize_poll_result(
         return None
 
     subject = _as_string(detail.get('subject')) or ''
-    text_body = _as_string(detail.get('text')) or ''
-    html_body = _as_string(detail.get('html')) or ''
+    text_body = _as_string(detail.get('text')) or _as_string(detail.get('content')) or ''
+    html_body = _as_string(detail.get('html')) or _as_string(detail.get('html_content')) or ''
     code = _extract_code_preferred(regex, text_body, html_body, subject)
     if code is None:
         return None
 
-    from_addr = _as_string(detail.get('from')) or ''
+    from_addr = _as_string(detail.get('from')) or _as_string(detail.get('from_address')) or ''
     return PollResult(
         status='success',
         code=code,
@@ -255,6 +259,10 @@ def _normalize_domain(value: str | None) -> str | None:
 def _prefer_created_at(message: dict[str, Any]) -> Any:
     if 'createdAt' in message:
         return message.get('createdAt')
+    if 'created_at' in message:
+        return message.get('created_at')
+    if 'timestamp' in message:
+        return message.get('timestamp')
     return message.get('created_at')
 
 

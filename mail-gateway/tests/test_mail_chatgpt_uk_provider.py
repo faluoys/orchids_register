@@ -103,16 +103,19 @@ def test_chatgpt_uk_poll_code_success_after_ts(monkeypatch) -> None:
             return httpx.Response(
                 200,
                 json={
-                    'data': [
-                        {
-                            'id': 'msg_old',
-                            'createdAt': '2026-04-03T10:00:00Z',
-                        },
-                        {
-                            'id': 'msg_new',
-                            'createdAt': '2026-04-03T10:10:00Z',
-                        },
-                    ],
+                    'data': {
+                        'emails': [
+                            {
+                                'id': 'msg_old',
+                                'created_at': '2026-04-03T10:00:00Z',
+                            },
+                            {
+                                'id': 'msg_new',
+                                'created_at': '2026-04-03T10:10:00Z',
+                            },
+                        ],
+                        'count': 2,
+                    },
                 },
             )
         if request.url.path == '/api/email/msg_new':
@@ -123,10 +126,10 @@ def test_chatgpt_uk_poll_code_success_after_ts(monkeypatch) -> None:
                     'data': {
                         'id': 'msg_new',
                         'subject': 'Your Orchids verification code',
-                        'text': 'Your verification code is 654321',
-                        'html': '<p>Your verification code is <strong>654321</strong></p>',
-                        'createdAt': '2026-04-03T10:10:00Z',
-                        'from': 'noreply@orchids.app',
+                        'content': 'Your verification code is 654321',
+                        'html_content': '<p>Your verification code is <strong>654321</strong></p>',
+                        'created_at': '2026-04-03T10:10:00Z',
+                        'from_address': 'noreply@orchids.app',
                     },
                 },
             )
@@ -164,7 +167,7 @@ def test_chatgpt_uk_poll_code_timeout(monkeypatch) -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == '/api/emails'
-        return httpx.Response(200, json={'data': []})
+        return httpx.Response(200, json={'data': {'emails': [], 'count': 0}})
 
     provider = _make_provider(handler)
 
