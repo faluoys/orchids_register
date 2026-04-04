@@ -177,6 +177,14 @@ pub fn attempt_email_verification(
 }
 
 pub fn extract_client_cookie(cookie_store: &SharedCookieStore) -> Option<String> {
+    extract_cookie_value(cookie_store, "__client")
+}
+
+pub fn extract_client_uat(cookie_store: &SharedCookieStore) -> Option<String> {
+    extract_cookie_value(cookie_store, "__client_uat")
+}
+
+fn extract_cookie_value(cookie_store: &SharedCookieStore, target_name: &str) -> Option<String> {
     let urls = [
         Url::parse("https://clerk.orchids.app/").ok(),
         Url::parse("https://accounts.orchids.app/").ok(),
@@ -189,7 +197,7 @@ pub fn extract_client_cookie(cookie_store: &SharedCookieStore) -> Option<String>
 
     for url in urls.into_iter().flatten() {
         for (name, value) in store.get_request_values(&url) {
-            if name == "__client" && !value.is_empty() {
+            if name == target_name && !value.is_empty() {
                 return Some(value.to_string());
             }
         }

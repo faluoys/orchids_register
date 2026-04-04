@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from mail_gateway.app import create_app
 from mail_gateway.config import Settings
 import mail_gateway.providers.luckmail as luckmail_module
+from mail_gateway.services.code_poll_service import CodePollService
 from mail_gateway.services.session_service import SessionService
 
 
@@ -24,6 +25,8 @@ def _make_client() -> TestClient:
         luckmail_api_key="AC-test-key",
         yyds_base_url='https://maliapi.215.im/v1',
         yyds_api_key='AC-yyds-test-key',
+        mail_chatgpt_uk_base_url='https://mail.chatgpt.org.uk',
+        mail_chatgpt_uk_api_key='AC-mail-chatgpt-uk-test-key',
     )
     return TestClient(create_app(settings=settings, testing=True))
 
@@ -92,9 +95,51 @@ def test_acquire_yyds_persistent_returns_unified_contract() -> None:
     assert acquired.status_code == 200, acquired.text
     payload = acquired.json()
     assert payload['provider'] == 'yyds_mail'
-    assert payload['mode'] == 'purchased'
+    assert payload['mode'] == 'persistent'
     assert payload['address'] == 'orchids@example.com'
     assert payload['upstream_ref'] == 'inbox:ibox_stub'
+
+
+def test_acquire_mail_chatgpt_uk_persistent_returns_unified_contract() -> None:
+    client = _make_client()
+
+    acquired = client.post(
+        "/v1/inboxes/acquire",
+        json={
+            "provider": "mail_chatgpt_uk",
+            "mode": "persistent",
+            "project": "orchids",
+            "domain": "chatgpt.org.uk",
+            "prefix": "orchids",
+            "metadata": {},
+        },
+    )
+
+    assert acquired.status_code == 200, acquired.text
+    payload = acquired.json()
+    assert payload['provider'] == 'mail_chatgpt_uk'
+    assert payload['mode'] == 'persistent'
+    assert payload['address'] == 'orchids@chatgpt.org.uk'
+    assert payload['upstream_ref'] == 'inbox:mail_chatgpt_uk_stub'
+
+
+def test_acquire_mail_chatgpt_uk_purchased_rejected() -> None:
+    client = _make_client()
+
+    acquired = client.post(
+        "/v1/inboxes/acquire",
+        json={
+            "provider": "mail_chatgpt_uk",
+            "mode": "purchased",
+            "project": "orchids",
+            "metadata": {},
+        },
+    )
+
+    assert acquired.status_code == 400
+    detail = acquired.json().get("detail", "")
+    assert "mail_chatgpt_uk" in detail
+    assert "persistent" in detail
 
 
 def test_acquire_then_poll_then_release_works_with_sdk_auto_async_dispatch(monkeypatch) -> None:
@@ -106,6 +151,8 @@ def test_acquire_then_poll_then_release_works_with_sdk_auto_async_dispatch(monke
         luckmail_api_key="AC-test-key",
         yyds_base_url='https://maliapi.215.im/v1',
         yyds_api_key='AC-yyds-test-key',
+        mail_chatgpt_uk_base_url='https://mail.chatgpt.org.uk',
+        mail_chatgpt_uk_api_key='AC-mail-chatgpt-uk-test-key',
     )
 
     class FakeUser:
@@ -371,6 +418,74 @@ def test_poll_code_unknown_session_returns_404() -> None:
     assert response.json() == {"detail": "session not found"}
 
 
+def test_poll_code_invalid_pattern_returns_400() -> None:
+    client = _make_client()
+
+    acquired = client.post(
+        "/v1/inboxes/acquire",
+        json={
+            "provider": "luckmail",
+            "mode": "purchased",
+            "project": "orchids",
+            "metadata": {},
+        },
+    )
+    session_id = acquired.json()["session_id"]
+
+    response = client.post(
+        f"/v1/inboxes/{session_id}/poll-code",
+        json={
+            "timeout_seconds": 5,
+            "interval_seconds": 0.1,
+            "code_pattern": "(",
+            "after_ts": None,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "invalid code_pattern"}
+
+
+def test_poll_code_runtime_error_returns_502(monkeypatch) -> None:
+    client = _make_client()
+
+    acquired = client.post(
+        "/v1/inboxes/acquire",
+        json={
+            "provider": "luckmail",
+            "mode": "purchased",
+            "project": "orchids",
+            "metadata": {},
+        },
+    )
+    session_id = acquired.json()["session_id"]
+
+    def fake_poll_code(
+        self,
+        session_id: str,
+        timeout_seconds: int,
+        interval_seconds: float,
+        code_pattern: str,
+        after_ts: int | None,
+    ):
+        raise RuntimeError("provider poll exploded")
+
+    monkeypatch.setattr(CodePollService, "poll_code", fake_poll_code)
+
+    response = client.post(
+        f"/v1/inboxes/{session_id}/poll-code",
+        json={
+            "timeout_seconds": 5,
+            "interval_seconds": 0.1,
+            "code_pattern": "\\b(\\d{6})\\b",
+            "after_ts": None,
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": "provider poll exploded"}
+
+
 def test_release_missing_session_returns_404() -> None:
     client = _make_client()
 
@@ -378,4 +493,29 @@ def test_release_missing_session_returns_404() -> None:
 
     assert response.status_code == 404
     assert response.json() == {"detail": "session not found"}
+
+
+def test_release_runtime_error_returns_502(monkeypatch) -> None:
+    client = _make_client()
+
+    acquired = client.post(
+        "/v1/inboxes/acquire",
+        json={
+            "provider": "luckmail",
+            "mode": "purchased",
+            "project": "orchids",
+            "metadata": {},
+        },
+    )
+    session_id = acquired.json()["session_id"]
+
+    def fake_release(self, session_id: str) -> None:
+        raise RuntimeError("release failed upstream")
+
+    monkeypatch.setattr(SessionService, "release", fake_release)
+
+    response = client.delete(f"/v1/inboxes/{session_id}")
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": "release failed upstream"}
 

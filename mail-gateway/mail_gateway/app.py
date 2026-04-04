@@ -69,13 +69,17 @@ def create_app(settings: Settings | None = None, testing: bool = False) -> FastA
         allowed_provider_modes = {
             'luckmail': 'purchased',
             'yyds_mail': 'persistent',
+            'mail_chatgpt_uk': 'persistent',
         }
         expected_mode = allowed_provider_modes.get(request.provider)
         if expected_mode is None or request.mode != expected_mode:
-            _raise_bad_request('phase 1 only supports luckmail purchased mode or yyds_mail persistent mode')
+            supported_pairs = ', '.join(
+                f'{provider} {mode}' for provider, mode in allowed_provider_modes.items()
+            )
+            _raise_bad_request(f'phase 1 only supports {supported_pairs} mode')
 
         metadata = dict(request.metadata)
-        if request.provider == 'yyds_mail' and request.prefix:
+        if request.provider in {'yyds_mail', 'mail_chatgpt_uk'} and request.prefix:
             metadata['prefix'] = request.prefix
 
         try:
@@ -92,7 +96,7 @@ def create_app(settings: Settings | None = None, testing: bool = False) -> FastA
             'session_id': record.session_id,
             'address': record.address,
             'provider': record.provider,
-            'mode': record.mode,
+            'mode': request.mode,
             'expires_at': record.expires_at,
             'upstream_ref': record.upstream_ref,
         }

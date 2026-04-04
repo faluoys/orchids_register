@@ -8,7 +8,7 @@ import {
   stopMailGateway,
   testMailGatewayHealth,
 } from "@/lib/tauri-api";
-import type { MailGatewayHealthResult, ServiceStatus } from "@/lib/types";
+import type { MailGatewayHealthResult, ServiceSource, ServiceStatus } from "@/lib/types";
 
 const DEFAULTS = {
   mail_mode: "gateway",
@@ -24,6 +24,8 @@ const DEFAULTS = {
   luckmail_api_key: "",
   yyds_base_url: "https://maliapi.215.im/v1",
   yyds_api_key: "",
+  mail_chatgpt_uk_base_url: "https://mail.chatgpt.org.uk",
+  mail_chatgpt_uk_api_key: "",
 } as const;
 
 const SAVE_KEYS = [
@@ -41,6 +43,8 @@ const SAVE_KEYS = [
   "luckmail_api_key",
   "yyds_base_url",
   "yyds_api_key",
+  "mail_chatgpt_uk_base_url",
+  "mail_chatgpt_uk_api_key",
 ] as const;
 
 const CLEARABLE_KEYS = new Set<string>([
@@ -49,6 +53,7 @@ const CLEARABLE_KEYS = new Set<string>([
   "mail_domain",
   "luckmail_api_key",
   "yyds_api_key",
+  "mail_chatgpt_uk_api_key",
 ]);
 
 function deriveMailGatewayBaseUrl(configs: Record<string, string>): string {
@@ -74,6 +79,9 @@ function normalizeConfigs(config: Record<string, string>): Record<string, string
     luckmail_api_key: config["luckmail_api_key"] || DEFAULTS.luckmail_api_key,
     yyds_base_url: config["yyds_base_url"] || DEFAULTS.yyds_base_url,
     yyds_api_key: config["yyds_api_key"] || DEFAULTS.yyds_api_key,
+    mail_chatgpt_uk_base_url:
+      config["mail_chatgpt_uk_base_url"] || DEFAULTS.mail_chatgpt_uk_base_url,
+    mail_chatgpt_uk_api_key: config["mail_chatgpt_uk_api_key"] || DEFAULTS.mail_chatgpt_uk_api_key,
   };
 
   return {
@@ -97,6 +105,47 @@ function buildSavePayload(configs: Record<string, string>): Record<string, strin
   return payload;
 }
 
+function describeServiceSource(source: ServiceSource | undefined): string {
+  if (source === "desktop_managed") {
+    return "桌面托管";
+  }
+  if (source === "external") {
+    return "外部运行";
+  }
+  return "未启动";
+}
+
+function buildMailGatewayWarnings(configs: Record<string, string>): string[] {
+  const warnings: string[] = [];
+  if (!(configs["mail_gateway_host"] || "").trim()) {
+    warnings.push("还没填写 Mail Gateway Host。");
+  }
+  if (!(configs["mail_gateway_port"] || "").trim()) {
+    warnings.push("还没填写 Mail Gateway Port。");
+  }
+  if (!(configs["mail_gateway_database_path"] || "").trim()) {
+    warnings.push("还没填写数据库路径。");
+  }
+
+  const provider = (configs["mail_provider"] || "").trim().toLowerCase();
+  if (provider === "luckmail" && !(configs["luckmail_api_key"] || "").trim()) {
+    warnings.push("当前选择的是 LuckMail，但还没填写 LuckMail API Key。");
+  }
+  if (provider === "yyds_mail" && !(configs["yyds_api_key"] || "").trim()) {
+    warnings.push("当前选择的是 YYDS Mail，但还没填写 YYDS API Key。");
+  }
+  if (provider === "mail_chatgpt_uk" && !(configs["mail_chatgpt_uk_api_key"] || "").trim()) {
+    warnings.push("当前选择的是 GPTMail（provider: mail_chatgpt_uk），但还没填写 API Key。");
+  }
+  if ((configs["mail_chatgpt_uk_api_key"] || "").trim() && provider !== "mail_chatgpt_uk") {
+    warnings.push("已填写 GPTMail API Key；如果要使用它，请把 Provider 改成 `mail_chatgpt_uk`。");
+  }
+  if (provider === "mail_chatgpt_uk" && (configs["mail_provider_mode"] || "").trim() !== "persistent") {
+    warnings.push("使用 GPTMail 时，Provider Mode 应设置为 `persistent`。");
+  }
+  return warnings;
+}
+
 export default function InboxConfigPage() {
   const [configs, setConfigs] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
@@ -108,6 +157,7 @@ export default function InboxConfigPage() {
   const [healthResult, setHealthResult] = useState<MailGatewayHealthResult | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const guidanceWarnings = buildMailGatewayWarnings(configs);
 
   const refreshServiceStatus = useCallback(async () => {
     try {
@@ -262,6 +312,7 @@ export default function InboxConfigPage() {
 
               <div className="service-meta">
                 <span>Base URL: {deriveMailGatewayBaseUrl(configs)}</span>
+                <span>来源: {describeServiceSource(serviceStatus?.source)}</span>
                 <span>PID: {serviceStatus?.pid ?? "-"}</span>
                 <span>最近启动: {serviceStatus?.last_started_at || "-"}</span>
               </div>
@@ -318,6 +369,25 @@ export default function InboxConfigPage() {
                 <div className="service-ok">
                   健康检查通过: status={healthResult.status}, timestamp={healthResult.timestamp}
                 </div>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="config-panel">
+            <div className="guidance-card">
+              <div className="guidance-title">桌面端配置提示</div>
+              <div className="guidance-copy">
+                这里已经是 Mail Gateway 的主配置入口。桌面版不再要求你先去改
+                <code> runtime.local.yaml </code>
+                ，只有在跑旧脚本或 CLI 时才需要回去看 YAML。
+              </div>
+              <ul className="guidance-list">
+                <li>首次配置先填 Host、Port、Database Path，再补对应邮箱供应商的 API Key。</li>
+                <li>保存后先点“启动”，服务起来之后再点“健康检查”，再去跑注册。</li>
+                <li>健康检查失败时，优先看 Provider Key、Base URL、端口占用和来源状态。</li>
+              </ul>
+              {guidanceWarnings.length > 0 ? (
+                <div className="guidance-warning">{guidanceWarnings.join(" ")}</div>
               ) : null}
             </div>
           </div>
@@ -411,7 +481,7 @@ export default function InboxConfigPage() {
                 style={{ width: "100%" }}
               />
             </div>
-            <div className="form-group" style={{ marginBottom: 0 }}>
+            <div className="form-group">
               <label>YYDS API Key</label>
               <input
                 type="password"
@@ -421,10 +491,44 @@ export default function InboxConfigPage() {
                 style={{ width: "100%" }}
               />
             </div>
+            <div className="form-group">
+              <label>GPTMail Base URL</label>
+              <input
+                type="text"
+                value={configs["mail_chatgpt_uk_base_url"] || ""}
+                onChange={(event) => updateConfig("mail_chatgpt_uk_base_url", event.target.value)}
+                className="input"
+                style={{ width: "100%" }}
+              />
+              <div className="settings-hint">对应 provider 标识是 `mail_chatgpt_uk`。</div>
+            </div>
+            <div className="form-group" style={{ marginBottom: 0 }}>
+              <label>GPTMail API Key</label>
+              <input
+                type="password"
+                value={configs["mail_chatgpt_uk_api_key"] || ""}
+                onChange={(event) => updateConfig("mail_chatgpt_uk_api_key", event.target.value)}
+                className="input"
+                style={{ width: "100%" }}
+              />
+              <div className="settings-hint">使用 GPTMail 时，同时把 Provider 设为 `mail_chatgpt_uk`、Provider Mode 设为 `persistent`。</div>
+            </div>
           </div>
 
           <div className="config-panel">
             <div className="settings-title">注册使用的收件参数</div>
+            <div className="guidance-card" style={{ marginBottom: 14 }}>
+              <div className="guidance-title">这一组参数决定注册时怎么取邮箱</div>
+              <div className="guidance-copy">
+                常用组合现在有三种：
+                <code> yyds_mail + persistent </code>
+                <code> mail_chatgpt_uk + persistent </code>
+                <code> luckmail + purchased </code>
+                。其中 `mail_chatgpt_uk` 对应的就是 GPTMail。如果你没有特殊需求，`Project Code` 通常保持
+                <code> orchids </code>
+                ，域名留空即可。
+              </div>
+            </div>
             <div className="form-group">
               <label>邮件模式</label>
               <select
@@ -436,6 +540,7 @@ export default function InboxConfigPage() {
                 <option value="gateway">gateway</option>
                 <option value="manual">manual</option>
               </select>
+              <div className="settings-hint">桌面端当前主流程用的是 `gateway`，通常不需要改成 `manual`。</div>
             </div>
             <div className="form-group">
               <label>Provider</label>
@@ -446,6 +551,9 @@ export default function InboxConfigPage() {
                 className="input"
                 style={{ width: "100%", maxWidth: 320 }}
               />
+              <div className="settings-hint">
+                填写 mail-gateway 里要使用的 provider，例如 `yyds_mail`、`luckmail`、`mail_chatgpt_uk`。如果使用 GPTMail，这里填 `mail_chatgpt_uk`。
+              </div>
             </div>
             <div className="form-group">
               <label>Provider Mode</label>
@@ -456,6 +564,9 @@ export default function InboxConfigPage() {
                 className="input"
                 style={{ width: "100%", maxWidth: 320 }}
               />
+              <div className="settings-hint">
+                `persistent` 多用于 `yyds_mail`/`mail_chatgpt_uk`（GPTMail），`purchased` 多用于 `luckmail`。
+              </div>
             </div>
             <div className="form-group">
               <label>Project Code</label>
@@ -466,6 +577,7 @@ export default function InboxConfigPage() {
                 className="input"
                 style={{ width: "100%", maxWidth: 320 }}
               />
+              <div className="settings-hint">通常填写 `orchids`，除非你的 mail-gateway 侧明确要求用别的项目代号。</div>
             </div>
             <div className="form-group" style={{ marginBottom: 0 }}>
               <label>指定域名</label>
@@ -476,7 +588,7 @@ export default function InboxConfigPage() {
                 className="input"
                 style={{ width: "100%", maxWidth: 320 }}
               />
-              <div className="settings-hint">留空时由 mail-gateway/provider 自行选择。</div>
+              <div className="settings-hint">留空时由 mail-gateway/provider 自行选择，只有你想固定后缀时才填写。</div>
             </div>
           </div>
 

@@ -33,6 +33,16 @@ pub struct ServiceStatus {
     pub pid: Option<u32>,
     pub last_started_at: Option<String>,
     pub last_error: Option<String>,
+    pub source: ServiceSource,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceSource {
+    #[default]
+    Stopped,
+    DesktopManaged,
+    External,
 }
 
 impl ServiceStatus {
@@ -41,11 +51,14 @@ impl ServiceStatus {
         self.pid = pid;
         self.last_started_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
         self.last_error = None;
+        self.source = ServiceSource::DesktopManaged;
     }
 
     pub fn mark_stopped(&mut self, last_error: Option<String>) {
         self.running = false;
         self.pid = None;
+        self.last_started_at = None;
+        self.source = ServiceSource::Stopped;
         if let Some(message) = last_error {
             self.last_error = Some(message);
         }
@@ -54,13 +67,17 @@ impl ServiceStatus {
     pub fn mark_failed(&mut self, message: String) {
         self.running = false;
         self.pid = None;
+        self.last_started_at = None;
         self.last_error = Some(message);
+        self.source = ServiceSource::Stopped;
     }
 
-    pub fn mark_external_running(&mut self) {
+    pub fn mark_external_running(&mut self, pid: Option<u32>) {
         self.running = true;
-        self.pid = None;
+        self.pid = pid;
+        self.last_started_at = None;
         self.last_error = None;
+        self.source = ServiceSource::External;
     }
 }
 
@@ -75,8 +92,9 @@ impl ManagedService {
         let Some(child) = self.child.as_mut() else {
             self.status.running = false;
             self.status.pid = None;
-            if probe_target.is_some_and(is_probe_target_running) {
-                self.status.mark_external_running();
+            if let Some(target) = probe_target.filter(|target| is_probe_target_running(target)) {
+                self.status
+                    .mark_external_running(find_pid_by_probe_target(target));
             }
             return;
         };
@@ -143,9 +161,27 @@ impl ManagedService {
     }
 
     fn stop(&mut self, probe_target: Option<&ProbeTarget>) -> Result<ServiceStatus, String> {
+        self.stop_with(probe_target, stop_process_by_pid)
+    }
+
+    fn stop_with<F>(
+        &mut self,
+        probe_target: Option<&ProbeTarget>,
+        stop_pid: F,
+    ) -> Result<ServiceStatus, String>
+    where
+        F: Fn(u32) -> Result<(), String>,
+    {
         self.refresh(probe_target);
         let Some(mut child) = self.child.take() else {
             if self.status.running {
+                if let Some(target) = probe_target {
+                    let pid = find_pid_by_probe_target(target)
+                        .ok_or_else(|| "Service is running outside desktop app and PID could not be determined".to_string())?;
+                    stop_pid(pid)?;
+                    self.status.mark_stopped(None);
+                    return Ok(self.status.clone());
+                }
                 return Err("Service is running outside desktop app and cannot be stopped here".to_string());
             }
             self.status.mark_stopped(None);
@@ -256,6 +292,117 @@ fn is_probe_target_running(target: &ProbeTarget) -> bool {
     })
 }
 
+fn find_pid_by_probe_target(target: &ProbeTarget) -> Option<u32> {
+    #[cfg(windows)]
+    {
+        let output = Command::new("netstat")
+            .args(["-ano", "-p", "tcp"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8(output.stdout).ok()?;
+        parse_windows_netstat_pid(&stdout, target)
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = target;
+        None
+    }
+}
+
+fn parse_windows_netstat_pid(output: &str, target: &ProbeTarget) -> Option<u32> {
+    output.lines().find_map(|line| {
+        let columns: Vec<&str> = line.split_whitespace().collect();
+        if columns.len() < 5 {
+            return None;
+        }
+        if !columns[0].eq_ignore_ascii_case("TCP") {
+            return None;
+        }
+        if !columns[3].eq_ignore_ascii_case("LISTENING") {
+            return None;
+        }
+        if !local_address_matches_probe_target(columns[1], target) {
+            return None;
+        }
+        columns[4].parse::<u32>().ok()
+    })
+}
+
+fn local_address_matches_probe_target(local_address: &str, target: &ProbeTarget) -> bool {
+    let Some((host, port)) = split_socket_host_port(local_address) else {
+        return false;
+    };
+    if port != target.port {
+        return false;
+    }
+
+    let target_host = target.host.trim().to_ascii_lowercase();
+    let local_host = host.trim_matches(|ch| ch == '[' || ch == ']').to_ascii_lowercase();
+
+    local_host == target_host
+        || (target_host == "localhost" && (local_host == "127.0.0.1" || local_host == "::1"))
+        || ((target_host == "0.0.0.0" || target_host == "::") && (local_host == "0.0.0.0" || local_host == "::"))
+}
+
+fn split_socket_host_port(local_address: &str) -> Option<(&str, u16)> {
+    let trimmed = local_address.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(rest) = trimmed.strip_prefix('[') {
+        let end = rest.find(']')?;
+        let host = &rest[..end];
+        let port = rest[end + 1..].strip_prefix(':')?.parse::<u16>().ok()?;
+        return Some((host, port));
+    }
+
+    let separator = trimmed.rfind(':')?;
+    let host = &trimmed[..separator];
+    let port = trimmed[separator + 1..].parse::<u16>().ok()?;
+    Some((host, port))
+}
+
+fn stop_process_by_pid(pid: u32) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let output = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::piped())
+            .stdout(Stdio::piped())
+            .output()
+            .map_err(|err| format!("Failed to stop process {}: {}", pid, err))?;
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            output.status.to_string()
+        };
+        Err(format!("Failed to stop process {}: {}", pid, detail))
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        Err("Stopping external services by PID is not implemented on this platform".to_string())
+    }
+}
+
 fn resolve_repo_path(repo_root: &str, relative_or_absolute: &str) -> PathBuf {
     let candidate = PathBuf::from(relative_or_absolute);
     if candidate.is_absolute() {
@@ -298,6 +445,12 @@ fn build_mail_gateway_spec_with_python(
     let luckmail_api_key = optional_config(config, "luckmail_api_key", "");
     let yyds_base_url = optional_config(config, "yyds_base_url", "https://maliapi.215.im/v1");
     let yyds_api_key = optional_config(config, "yyds_api_key", "");
+    let mail_chatgpt_uk_base_url = optional_config(
+        config,
+        "mail_chatgpt_uk_base_url",
+        "https://mail.chatgpt.org.uk",
+    );
+    let mail_chatgpt_uk_api_key = optional_config(config, "mail_chatgpt_uk_api_key", "");
     let workdir = PathBuf::from(repo_root).join("mail-gateway");
     let db_path = resolve_repo_path(repo_root, &database_path);
 
@@ -317,6 +470,8 @@ fn build_mail_gateway_spec_with_python(
             ("LUCKMAIL_API_KEY".to_string(), luckmail_api_key),
             ("YYDS_BASE_URL".to_string(), yyds_base_url),
             ("YYDS_API_KEY".to_string(), yyds_api_key),
+            ("MAIL_CHATGPT_UK_BASE_URL".to_string(), mail_chatgpt_uk_base_url),
+            ("MAIL_CHATGPT_UK_API_KEY".to_string(), mail_chatgpt_uk_api_key),
         ],
         workdir,
         probe_target,
@@ -480,8 +635,8 @@ mod tests {
 
     use super::{
         build_mail_gateway_spec_with_python, build_turnstile_solver_spec, conda_env_python_path,
-        find_conda_env_prefix_in_json, CommandSpec, ProbeTarget, ServiceManager, ServiceStatus,
-        MAIL_GATEWAY_SERVICE,
+        find_conda_env_prefix_in_json, parse_windows_netstat_pid, CommandSpec, ManagedService,
+        ProbeTarget, ServiceManager, ServiceSource, ServiceStatus, MAIL_GATEWAY_SERVICE,
     };
 
     fn config(entries: &[(&str, &str)]) -> HashMap<String, String> {
@@ -502,6 +657,8 @@ mod tests {
             ("luckmail_api_key", "key-1"),
             ("yyds_base_url", "https://maliapi.215.im/v1"),
             ("yyds_api_key", "key-2"),
+            ("mail_chatgpt_uk_base_url", "https://mail.chatgpt.org.uk"),
+            ("mail_chatgpt_uk_api_key", "key-3"),
         ]);
 
         let spec = build_mail_gateway_spec_with_python(
@@ -516,6 +673,14 @@ mod tests {
             .envs
             .iter()
             .any(|(key, value)| key == "LUCKMAIL_API_KEY" && value == "key-1"));
+        assert!(spec
+            .envs
+            .iter()
+            .any(|(key, value)| key == "MAIL_CHATGPT_UK_BASE_URL" && value == "https://mail.chatgpt.org.uk"));
+        assert!(spec
+            .envs
+            .iter()
+            .any(|(key, value)| key == "MAIL_CHATGPT_UK_API_KEY" && value == "key-3"));
         assert_eq!(spec.workdir.to_string_lossy(), r"D:\repo\mail-gateway");
     }
 
@@ -554,6 +719,7 @@ mod tests {
         assert!(!status.running);
         assert!(status.last_error.is_none());
         assert!(status.pid.is_none());
+        assert_eq!(status.source, ServiceSource::Stopped);
     }
 
     #[test]
@@ -563,6 +729,7 @@ mod tests {
         assert!(status.running);
         assert_eq!(status.pid, Some(1234));
         assert!(status.last_started_at.is_some());
+        assert_eq!(status.source, ServiceSource::DesktopManaged);
     }
 
     #[test]
@@ -580,7 +747,8 @@ mod tests {
         );
 
         assert!(statuses[MAIL_GATEWAY_SERVICE].running);
-        assert!(statuses[MAIL_GATEWAY_SERVICE].pid.is_none());
+        assert_eq!(statuses[MAIL_GATEWAY_SERVICE].pid, Some(std::process::id()));
+        assert_eq!(statuses[MAIL_GATEWAY_SERVICE].source, ServiceSource::External);
     }
 
     #[test]
@@ -603,22 +771,43 @@ mod tests {
             .expect("running status");
 
         assert!(status.running);
-        assert!(status.pid.is_none());
+        assert_eq!(status.pid, Some(std::process::id()));
+        assert_eq!(status.source, ServiceSource::External);
     }
 
     #[test]
-    fn stopping_external_service_reports_not_managed() {
+    fn parses_windows_netstat_output_for_pid() {
+        let output = "\
+  TCP    127.0.0.1:5000         0.0.0.0:0              LISTENING       12345\r\n\
+  TCP    127.0.0.1:8081         0.0.0.0:0              LISTENING       45678\r\n";
+
+        assert_eq!(
+            parse_windows_netstat_pid(output, &ProbeTarget {
+                host: "127.0.0.1".to_string(),
+                port: 8081,
+            }),
+            Some(45678)
+        );
+    }
+
+    #[test]
+    fn stopping_external_service_by_resolved_pid_succeeds() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
-        let mut manager = ServiceManager::default();
+        let mut service = ManagedService::default();
 
-        let err = manager
-            .stop_mail_gateway(Some(ProbeTarget {
-                host: "127.0.0.1".to_string(),
-                port,
-            }))
-            .expect_err("external service should not be stoppable");
+        let status = service
+            .stop_with(
+                Some(&ProbeTarget {
+                    host: "127.0.0.1".to_string(),
+                    port,
+                }),
+                |_pid| Ok(()),
+            )
+            .expect("external service should be stoppable via resolved pid");
 
-        assert!(err.contains("outside desktop app"));
+        assert!(!status.running);
+        assert!(status.pid.is_none());
+        assert_eq!(status.source, ServiceSource::Stopped);
     }
 }

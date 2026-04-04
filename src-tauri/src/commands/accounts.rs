@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use reqwest::blocking::ClientBuilder;
 use serde::Serialize;
 use tauri::State;
 
@@ -11,6 +12,12 @@ use crate::state::AppState;
 
 const ORCHIDS_API_DEFAULT_PROJECT_ID: &str = "280b7bae-cd29-41e4-a0a6-7f603c43b607";
 const ORCHIDS_API_DEFAULT_AGENT_MODE: &str = "claude-opus-4.5";
+const EXPORT_DESKTOP_JWT_TIMEOUT_SECS: i64 = 15;
+const JWT_REFRESH_BUFFER_SECS: i64 = 5 * 60;
+const DESKTOP_CLERK_JS_VERSION: &str = "5.117.0";
+const DESKTOP_CLERK_API_VERSION: &str = "2025-11-10";
+const DESKTOP_SESSION_USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Orchids/1.0.6 Chrome/138.0.7204.251 Electron/37.10.3 Safari/537.36";
 
 #[derive(Debug, Serialize)]
 struct OrchidsApiImportAccount {
@@ -20,6 +27,7 @@ struct OrchidsApiImportAccount {
     client_uat: String,
     project_id: String,
     user_id: String,
+    desktop_jwt: String,
     agent_mode: String,
     email: String,
     weight: i32,
@@ -98,7 +106,7 @@ fn filter_accounts_by_ids(
 }
 
 fn build_orchids_api_rows(accounts: &[db::Account]) -> Vec<OrchidsApiImportAccount> {
-    let client_uat = SystemTime::now()
+    let fallback_client_uat = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs().to_string())
         .unwrap_or_else(|_| "0".to_string());
@@ -109,6 +117,8 @@ fn build_orchids_api_rows(accounts: &[db::Account]) -> Vec<OrchidsApiImportAccou
             let session_id = account.created_session_id.as_deref()?.trim();
             let user_id = account.created_user_id.as_deref()?.trim();
             let client_cookie = normalize_client_cookie(account.client_cookie.as_deref()?)?;
+            let client_uat = normalize_optional_text(account.client_uat.as_deref())
+                .unwrap_or_else(|| fallback_client_uat.clone());
 
             if session_id.is_empty() || user_id.is_empty() || client_cookie.is_empty() {
                 return None;
@@ -118,9 +128,10 @@ fn build_orchids_api_rows(accounts: &[db::Account]) -> Vec<OrchidsApiImportAccou
                 name: format!("orchids-{}", account.id),
                 session_id: session_id.to_string(),
                 client_cookie,
-                client_uat: client_uat.clone(),
+                client_uat,
                 project_id: ORCHIDS_API_DEFAULT_PROJECT_ID.to_string(),
                 user_id: user_id.to_string(),
+                desktop_jwt: account.desktop_jwt.clone().unwrap_or_default(),
                 agent_mode: ORCHIDS_API_DEFAULT_AGENT_MODE.to_string(),
                 email: account.email.clone(),
                 weight: 1,
@@ -128,6 +139,232 @@ fn build_orchids_api_rows(accounts: &[db::Account]) -> Vec<OrchidsApiImportAccou
             })
         })
         .collect()
+}
+
+fn apply_refreshed_desktop_jwts(
+    accounts: &mut [db::Account],
+    refreshed_by_id: &HashMap<i64, String>,
+) {
+    for account in accounts {
+        if let Some(jwt) = refreshed_by_id.get(&account.id) {
+            account.desktop_jwt = Some(jwt.clone());
+        }
+    }
+}
+
+fn refresh_desktop_jwts_for_export(
+    accounts: &[db::Account],
+    proxy: Option<&str>,
+) -> HashMap<i64, String> {
+    let mut refreshed = HashMap::new();
+
+    for account in accounts {
+        if let Some(jwt) = maybe_refresh_desktop_jwt_for_export(account, proxy) {
+            refreshed.insert(account.id, jwt);
+        }
+    }
+
+    refreshed
+}
+
+fn maybe_refresh_desktop_jwt_for_export(
+    account: &db::Account,
+    proxy: Option<&str>,
+) -> Option<String> {
+    if !desktop_jwt_needs_refresh(account.desktop_jwt.as_deref(), current_unix_timestamp()) {
+        return None;
+    }
+
+    let session_id = normalize_optional_text(account.created_session_id.as_deref())?;
+    let client_cookie = normalize_client_cookie(account.client_cookie.as_deref()?)?;
+    let client_uat = effective_client_uat(account);
+
+    match fetch_fresh_desktop_jwt(
+        &session_id,
+        &client_cookie,
+        &client_uat,
+        proxy,
+        EXPORT_DESKTOP_JWT_TIMEOUT_SECS,
+    ) {
+        Ok(jwt) => Some(jwt),
+        Err(err) => {
+            eprintln!(
+                "[export] 刷新 desktop_jwt 失败: account_id={}, email={} -> {}",
+                account.id, account.email, err
+            );
+            None
+        }
+    }
+}
+
+fn fetch_fresh_desktop_jwt(
+    session_id: &str,
+    client_cookie: &str,
+    client_uat: &str,
+    proxy: Option<&str>,
+    timeout_secs: i64,
+) -> Result<String, String> {
+    let mut builder = ClientBuilder::new();
+    if let Some(proxy_url) = proxy.filter(|value| !value.trim().is_empty()) {
+        let configured_proxy = reqwest::Proxy::all(proxy_url)
+            .map_err(|e| format!("无效的代理地址: {}", e))?
+            .no_proxy(reqwest::NoProxy::from_string("localhost,127.0.0.1"));
+        builder = builder.proxy(configured_proxy);
+    }
+
+    let client = builder
+        .build()
+        .map_err(|e| format!("创建导出客户端失败: {}", e))?;
+
+    let url = format!("https://clerk.orchids.app/v1/client/sessions/{session_id}/tokens");
+    let response = client
+        .post(url)
+        .query(&[
+            ("__clerk_api_version", DESKTOP_CLERK_API_VERSION),
+            ("_clerk_js_version", DESKTOP_CLERK_JS_VERSION),
+            ("debug", "skip_cache"),
+        ])
+        .header("accept", "*/*")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("user-agent", DESKTOP_SESSION_USER_AGENT)
+        .header("accept-language", "zh-CN,zh;q=0.9")
+        .header(
+            "cookie",
+            format!("__client={client_cookie}; __client_uat={client_uat}"),
+        )
+        .form(&[("organization_id", "")])
+        .timeout(std::time::Duration::from_secs(timeout_secs.max(0) as u64))
+        .send()
+        .map_err(|e| format!("获取 session jwt 失败: {}", e))?;
+
+    let status = response.status().as_u16();
+    let body = response.text().unwrap_or_default();
+    if status >= 400 {
+        return Err(format!("获取 session jwt 失败: HTTP {} -> {}", status, body));
+    }
+
+    let value: serde_json::Value = serde_json::from_str(&body)
+        .unwrap_or_else(|_| serde_json::json!({ "raw": body }));
+    find_first_jwt(&value)
+        .ok_or_else(|| format!("tokens 响应里未找到 jwt: {}", value))
+}
+
+fn find_first_jwt(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(jwt) = map
+                .get("jwt")
+                .and_then(serde_json::Value::as_str)
+                .filter(|current| !current.is_empty())
+            {
+                return Some(jwt.to_string());
+            }
+
+            for child in map.values() {
+                if let Some(jwt) = find_first_jwt(child) {
+                    return Some(jwt);
+                }
+            }
+
+            None
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                if let Some(jwt) = find_first_jwt(child) {
+                    return Some(jwt);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn current_unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+fn effective_client_uat(account: &db::Account) -> String {
+    normalize_optional_text(account.client_uat.as_deref())
+        .unwrap_or_else(|| current_unix_timestamp().to_string())
+}
+
+fn desktop_jwt_needs_refresh(jwt: Option<&str>, now_unix: i64) -> bool {
+    match jwt.and_then(jwt_exp_unix) {
+        Some(exp) => exp <= now_unix + JWT_REFRESH_BUFFER_SECS,
+        None => true,
+    }
+}
+
+fn jwt_exp_unix(jwt: &str) -> Option<i64> {
+    let payload = jwt.split('.').nth(1)?;
+    let decoded = decode_base64_url(payload)?;
+    let value: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+
+    value
+        .get("exp")
+        .and_then(serde_json::Value::as_i64)
+        .or_else(|| {
+            value
+                .get("exp")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|current| i64::try_from(current).ok())
+        })
+}
+
+fn decode_base64_url(input: &str) -> Option<Vec<u8>> {
+    let mut buffer = Vec::with_capacity(input.len());
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' => buffer.push(byte),
+            _ => return None,
+        }
+    }
+
+    while buffer.len() % 4 != 0 {
+        buffer.push(b'=');
+    }
+
+    let mut output = Vec::with_capacity(buffer.len() / 4 * 3);
+    for chunk in buffer.chunks(4) {
+        let a = decode_base64_url_char(chunk[0])?;
+        let b = decode_base64_url_char(chunk[1])?;
+        let c = if chunk[2] == b'=' {
+            64
+        } else {
+            decode_base64_url_char(chunk[2])?
+        };
+        let d = if chunk[3] == b'=' {
+            64
+        } else {
+            decode_base64_url_char(chunk[3])?
+        };
+
+        output.push((a << 2) | (b >> 4));
+        if c != 64 {
+            output.push(((b & 0x0f) << 4) | (c >> 2));
+        }
+        if d != 64 {
+            output.push(((c & 0x03) << 6) | d);
+        }
+    }
+
+    Some(output)
+}
+
+fn decode_base64_url_char(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'-' => Some(62),
+        b'_' => Some(63),
+        b'=' => Some(64),
+        _ => None,
+    }
 }
 
 fn render_export_payload(accounts: &[db::Account], format: &str) -> Result<String, String> {
@@ -359,10 +596,29 @@ pub async fn export_accounts(
     format: Option<String>,
     ids: Option<Vec<i64>>,
 ) -> Result<String, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    let accounts = db::get_all_accounts(&conn, status.as_deref(), None).map_err(|e| e.to_string())?;
-    let selected = filter_accounts_by_ids(accounts, ids.as_deref());
     let fmt = format.unwrap_or_else(|| "json".to_string());
+    let (mut selected, proxy) = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let accounts =
+            db::get_all_accounts(&conn, status.as_deref(), None).map_err(|e| e.to_string())?;
+        let selected = filter_accounts_by_ids(accounts, ids.as_deref());
+        let proxy = db::get_all_config(&conn)
+            .ok()
+            .and_then(|config| config.get("proxy").cloned())
+            .filter(|value| !value.is_empty());
+        (selected, proxy)
+    };
+
+    if fmt == "orchids-api" {
+        let selected_for_refresh = selected.clone();
+        let refreshed = tokio::task::spawn_blocking(move || {
+            refresh_desktop_jwts_for_export(&selected_for_refresh, proxy.as_deref())
+        })
+        .await
+        .map_err(|e| format!("导出前刷新 desktop_jwt 任务失败: {}", e))?;
+        apply_refreshed_desktop_jwts(&mut selected, &refreshed);
+    }
+
     render_export_payload(&selected, &fmt)
 }
 
@@ -520,6 +776,7 @@ mod tests {
             created_session_id: Some("sess_123".to_string()),
             created_user_id: Some("user_123".to_string()),
             client_cookie: Some("\"cookie_123\"".to_string()),
+            client_uat: Some("uat_123".to_string()),
             desktop_jwt: Some("jwt_123".to_string()),
             status: "complete".to_string(),
             error_message: None,
@@ -546,16 +803,17 @@ mod tests {
         assert_eq!(row.get("name").and_then(Value::as_str), Some("orchids-7"));
         assert_eq!(row.get("session_id").and_then(Value::as_str), Some("sess_123"));
         assert_eq!(row.get("client_cookie").and_then(Value::as_str), Some("cookie_123"));
+        assert_eq!(row.get("client_uat").and_then(Value::as_str), Some("uat_123"));
         assert_eq!(
             row.get("project_id").and_then(Value::as_str),
             Some("280b7bae-cd29-41e4-a0a6-7f603c43b607")
         );
         assert_eq!(row.get("user_id").and_then(Value::as_str), Some("user_123"));
+        assert_eq!(row.get("desktop_jwt").and_then(Value::as_str), Some("jwt_123"));
         assert_eq!(row.get("agent_mode").and_then(Value::as_str), Some("claude-opus-4.5"));
         assert_eq!(row.get("email").and_then(Value::as_str), Some("demo@example.com"));
         assert_eq!(row.get("weight").and_then(Value::as_i64), Some(1));
         assert_eq!(row.get("enabled").and_then(Value::as_bool), Some(true));
-        assert!(row.get("client_uat").and_then(Value::as_str).is_some());
     }
 
     #[test]
@@ -573,6 +831,56 @@ mod tests {
         let payload = render_export_payload(&[sample_account()], "cookie").unwrap();
         let value: Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(value, serde_json::json!(["cookie_123"]));
+    }
+
+    #[test]
+    fn orchids_api_export_falls_back_when_client_uat_missing() {
+        let mut account = sample_account();
+        account.client_uat = None;
+
+        let payload = render_export_payload(&[account], "orchids-api").unwrap();
+        let value: Value = serde_json::from_str(&payload).unwrap();
+        let rows = value.get("accounts").and_then(Value::as_array).unwrap();
+        let row = rows[0].as_object().unwrap();
+
+        assert_eq!(row.get("desktop_jwt").and_then(Value::as_str), Some("jwt_123"));
+        assert!(row.get("client_uat").and_then(Value::as_str).is_some());
+    }
+
+    #[test]
+    fn desktop_jwt_needs_refresh_when_expired() {
+        let expired = "eyJhbGciOiJub25lIn0.eyJleHAiOjE3MDAwMDAwMDB9.sig";
+        let still_valid = "eyJhbGciOiJub25lIn0.eyJleHAiOjQxMDI0NDQ4MDB9.sig";
+
+        assert!(desktop_jwt_needs_refresh(Some(expired), 1_775_243_784));
+        assert!(!desktop_jwt_needs_refresh(Some(still_valid), 1_775_243_784));
+        assert!(desktop_jwt_needs_refresh(None, 1_775_243_784));
+    }
+
+    #[test]
+    fn refreshed_desktop_jwt_overrides_stale_value_for_export() {
+        let mut accounts = vec![sample_account()];
+        let refreshed = HashMap::from([(7_i64, "jwt_fresh".to_string())]);
+
+        apply_refreshed_desktop_jwts(&mut accounts, &refreshed);
+
+        let payload = render_export_payload(&accounts, "orchids-api").unwrap();
+        let value: Value = serde_json::from_str(&payload).unwrap();
+        let rows = value.get("accounts").and_then(Value::as_array).unwrap();
+        let row = rows[0].as_object().unwrap();
+
+        assert_eq!(row.get("desktop_jwt").and_then(Value::as_str), Some("jwt_fresh"));
+    }
+
+    #[test]
+    fn effective_client_uat_falls_back_to_current_timestamp_when_missing() {
+        let mut account = sample_account();
+        account.client_uat = None;
+
+        let client_uat = effective_client_uat(&account);
+        let parsed = client_uat.parse::<i64>().expect("fallback client_uat 应为时间戳");
+
+        assert!(parsed > 0);
     }
 
     #[test]

@@ -8,7 +8,7 @@ import {
   stopTurnstileSolver,
   testProxy,
 } from "@/lib/tauri-api";
-import type { ServiceStatus } from "@/lib/types";
+import type { ServiceSource, ServiceStatus } from "@/lib/types";
 
 const DEFAULTS = {
   conda_env: "orchids-register",
@@ -98,6 +98,33 @@ function checkboxValue(current: string | undefined): boolean {
   return current === "true";
 }
 
+function describeServiceSource(source: ServiceSource | undefined): string {
+  if (source === "desktop_managed") {
+    return "桌面托管";
+  }
+  if (source === "external") {
+    return "外部运行";
+  }
+  return "未启动";
+}
+
+function buildTurnstileWarnings(configs: Record<string, string>): string[] {
+  const warnings: string[] = [];
+  if (!(configs["conda_env"] || "").trim()) {
+    warnings.push("还没填写 Conda Environment。");
+  }
+  if (!(configs["turnstile_host"] || "").trim()) {
+    warnings.push("还没填写 TurnstileSolver Host。");
+  }
+  if (!(configs["turnstile_port"] || "").trim()) {
+    warnings.push("还没填写 TurnstileSolver Port。");
+  }
+  if (!(configs["turnstile_thread"] || "").trim()) {
+    warnings.push("还没填写线程数。");
+  }
+  return warnings;
+}
+
 export default function SettingsPage() {
   const [configs, setConfigs] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
@@ -109,6 +136,7 @@ export default function SettingsPage() {
   const [proxyResult, setProxyResult] = useState<{ ip: string; country: string; city: string } | null>(null);
   const [proxyError, setProxyError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const guidanceWarnings = buildTurnstileWarnings(configs);
 
   const refreshServiceStatus = useCallback(async () => {
     try {
@@ -265,6 +293,7 @@ export default function SettingsPage() {
 
               <div className="service-meta">
                 <span>API URL: {deriveCaptchaApiUrl(configs)}</span>
+                <span>来源: {describeServiceSource(serviceStatus?.source)}</span>
                 <span>PID: {serviceStatus?.pid ?? "-"}</span>
                 <span>最近启动: {serviceStatus?.last_started_at || "-"}</span>
               </div>
@@ -302,6 +331,24 @@ export default function SettingsPage() {
               {serviceError ? <div className="service-error">{serviceError}</div> : null}
               {serviceStatus?.last_error ? (
                 <div className="service-error">{serviceStatus.last_error}</div>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="config-panel">
+            <div className="guidance-card">
+              <div className="guidance-title">桌面端配置提示</div>
+              <div className="guidance-copy">
+                这里负责桌面端自己的 TurnstileSolver 和代理相关配置。桌面流程会直接读取这些值，
+                不需要你再去同步修改 <code>runtime.local.yaml</code>。
+              </div>
+              <ul className="guidance-list">
+                <li>首次配置先确认 Conda 环境、Host、Port、Thread，再启动 TurnstileSolver。</li>
+                <li>服务起来后，注册流程会自动使用这里派生出的本地验证码 API 地址。</li>
+                <li>启动失败时，优先检查 Conda 环境名、端口占用、依赖是否已安装。</li>
+              </ul>
+              {guidanceWarnings.length > 0 ? (
+                <div className="guidance-warning">{guidanceWarnings.join(" ")}</div>
               ) : null}
             </div>
           </div>

@@ -8,6 +8,7 @@ export interface Account {
   created_session_id: string | null;
   created_user_id: string | null;
   client_cookie: string | null;
+  client_uat: string | null;
   desktop_jwt: string | null;
   status: "pending" | "running" | "complete" | "failed";
   error_message: string | null;
@@ -91,11 +92,14 @@ export interface RegisterArgs {
 
 export type ManagedServiceName = "mail_gateway" | "turnstile_solver";
 
+export type ServiceSource = "stopped" | "desktop_managed" | "external";
+
 export interface ServiceStatus {
   running: boolean;
   pid: number | null;
   last_started_at: string | null;
   last_error: string | null;
+  source: ServiceSource;
 }
 
 export interface MailGatewayHealthResult {

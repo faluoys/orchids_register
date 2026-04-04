@@ -2,6 +2,7 @@ from mail_gateway.config import Settings
 from mail_gateway.providers.base import AcquiredInbox, InboxProvider, PollResult
 from mail_gateway.providers.duckmail import DuckMailProvider
 from mail_gateway.providers.luckmail import LuckMailProvider
+from mail_gateway.providers.mail_chatgpt_uk import MailChatGPTUKProvider
 from mail_gateway.providers.yyds_mail import YYDSMailProvider
 
 
@@ -83,6 +84,45 @@ class StubYYDSMailProvider(InboxProvider):
         return None
 
 
+class StubMailChatGPTUKProvider(InboxProvider):
+    def acquire_inbox(
+        self,
+        project_code: str | None,
+        domain: str | None,
+        metadata: dict[str, str],
+    ) -> AcquiredInbox:
+        prefix = metadata.get('prefix') or project_code or 'user'
+        normalized_domain = (domain or 'chatgpt.org.uk').strip().lower().lstrip('@')
+        address = f'{prefix}@{normalized_domain}'
+        return AcquiredInbox(
+            address=address,
+            upstream_token=address,
+            upstream_ref='inbox:mail_chatgpt_uk_stub',
+        )
+
+    def poll_code(
+        self,
+        upstream_token: str,
+        timeout_seconds: int,
+        interval_seconds: float,
+        code_pattern: str,
+        after_ts: int | None,
+    ) -> PollResult:
+        return PollResult(
+            status='success',
+            code='482910',
+            message_id='msg_mail_chatgpt_uk_stub',
+            received_at='2026-04-03T10:10:00Z',
+            summary={
+                'from': 'support@mail.chatgpt.org.uk',
+                'subject': 'Your verification code',
+            },
+        )
+
+    def release_inbox(self, upstream_ref: str, upstream_token: str) -> None:
+        return None
+
+
 def build_providers(settings: Settings, testing: bool = False) -> dict[str, InboxProvider]:
     return {
         'luckmail': StubLuckMailProvider()
@@ -91,5 +131,8 @@ def build_providers(settings: Settings, testing: bool = False) -> dict[str, Inbo
         'yyds_mail': StubYYDSMailProvider()
         if testing
         else YYDSMailProvider(settings.yyds_base_url, settings.yyds_api_key),
+        'mail_chatgpt_uk': StubMailChatGPTUKProvider()
+        if testing
+        else MailChatGPTUKProvider(settings.mail_chatgpt_uk_base_url, settings.mail_chatgpt_uk_api_key),
         'duckmail': DuckMailProvider(),
     }
