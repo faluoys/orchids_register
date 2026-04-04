@@ -13,6 +13,8 @@ def test_health_endpoint_reports_enabled_luckmail_and_yyds_providers() -> None:
         luckmail_api_key='AC-test-key',
         yyds_base_url='https://maliapi.215.im/v1',
         yyds_api_key='AC-yyds-test-key',
+        mail_chatgpt_uk_base_url='https://mail.chatgpt.org.uk',
+        mail_chatgpt_uk_api_key='AC-mail-chatgpt-uk-test-key',
     )
     client = TestClient(create_app(settings=settings))
 
@@ -23,6 +25,7 @@ def test_health_endpoint_reports_enabled_luckmail_and_yyds_providers() -> None:
     assert payload['status'] == 'ok'
     assert payload['providers']['luckmail'] == 'enabled'
     assert payload['providers']['yyds_mail'] == 'enabled'
+    assert payload['providers']['mail_chatgpt_uk'] == 'enabled'
     assert payload['providers']['duckmail'] == 'disabled'
     assert isinstance(payload['timestamp'], int)
 
@@ -36,6 +39,8 @@ def test_health_endpoint_reports_disabled_providers_when_keys_missing() -> None:
         luckmail_api_key='',
         yyds_base_url='https://maliapi.215.im/v1',
         yyds_api_key='',
+        mail_chatgpt_uk_base_url='https://mail.chatgpt.org.uk',
+        mail_chatgpt_uk_api_key='',
     )
     client = TestClient(create_app(settings=settings))
 
@@ -46,5 +51,6 @@ def test_health_endpoint_reports_disabled_providers_when_keys_missing() -> None:
     assert payload['status'] == 'ok'
     assert payload['providers']['luckmail'] == 'disabled'
     assert payload['providers']['yyds_mail'] == 'disabled'
+    assert payload['providers']['mail_chatgpt_uk'] == 'disabled'
     assert payload['providers']['duckmail'] == 'disabled'
     assert isinstance(payload['timestamp'], int)
