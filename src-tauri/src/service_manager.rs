@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::env;
 use std::ffi::OsStr;
 use std::net::{TcpStream, ToSocketAddrs};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -12,6 +14,9 @@ use serde_json::Value;
 
 pub const MAIL_GATEWAY_SERVICE: &str = "mail_gateway";
 pub const TURNSTILE_SOLVER_SERVICE: &str = "turnstile_solver";
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandSpec {
@@ -142,6 +147,7 @@ impl ManagedService {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        apply_spawn_options(&mut command);
 
         for (key, value) in &spec.envs {
             command.env(key, value);
@@ -270,6 +276,13 @@ impl Drop for ServiceManager {
     fn drop(&mut self) {
         let _ = self.mail_gateway.stop(None);
         let _ = self.turnstile_solver.stop(None);
+    }
+}
+
+fn apply_spawn_options(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
     }
 }
 
