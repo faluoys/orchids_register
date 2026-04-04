@@ -3,6 +3,7 @@ import { Check, Loader2 } from "lucide-react";
 import {
   getAllConfig,
   getServiceStatus,
+  onServiceStatusChanged,
   saveConfig,
   startTurnstileSolver,
   stopTurnstileSolver,
@@ -170,6 +171,28 @@ export default function SettingsPage() {
   useEffect(() => {
     void loadConfig();
   }, [loadConfig]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void onServiceStatusChanged((event) => {
+      if (disposed || event.service !== "turnstile_solver") {
+        return;
+      }
+      setServiceStatus(event.status);
+      setServiceError(null);
+    }).then((handler) => {
+      unlisten = handler;
+    });
+
+    return () => {
+      disposed = true;
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, []);
 
   const autoSave = useCallback((next: Record<string, string>) => {
     if (debounceRef.current) {

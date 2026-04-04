@@ -1,7 +1,8 @@
 use std::collections::HashMap;
+use std::env;
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -179,6 +180,7 @@ impl ManagedService {
                     let pid = find_pid_by_probe_target(target)
                         .ok_or_else(|| "Service is running outside desktop app and PID could not be determined".to_string())?;
                     stop_pid(pid)?;
+                    let _ = wait_for_probe_target_to_stop(target, Duration::from_secs(3));
                     self.status.mark_stopped(None);
                     return Ok(self.status.clone());
                 }
@@ -188,14 +190,29 @@ impl ManagedService {
             return Ok(self.status.clone());
         };
 
-        child
-            .kill()
-            .map_err(|err| {
+        #[cfg(windows)]
+        {
+            stop_pid(child.id()).map_err(|err| {
                 let message = format!("停止进程失败: {}", err);
                 self.status.mark_failed(message.clone());
                 message
             })?;
+        }
+
+        #[cfg(not(windows))]
+        {
+            child
+                .kill()
+                .map_err(|err| {
+                    let message = format!("停止进程失败: {}", err);
+                    self.status.mark_failed(message.clone());
+                    message
+                })?;
+        }
         let _ = child.wait();
+        if let Some(target) = probe_target {
+            let _ = wait_for_probe_target_to_stop(target, Duration::from_secs(3));
+        }
         self.status.mark_stopped(None);
         Ok(self.status.clone())
     }
@@ -295,7 +312,7 @@ fn is_probe_target_running(target: &ProbeTarget) -> bool {
 fn find_pid_by_probe_target(target: &ProbeTarget) -> Option<u32> {
     #[cfg(windows)]
     {
-        let output = Command::new("netstat")
+        let output = Command::new(windows_system_executable("netstat.exe"))
             .args(["-ano", "-p", "tcp"])
             .stdin(Stdio::null())
             .stderr(Stdio::null())
@@ -307,6 +324,7 @@ fn find_pid_by_probe_target(target: &ProbeTarget) -> Option<u32> {
         }
         let stdout = String::from_utf8(output.stdout).ok()?;
         parse_windows_netstat_pid(&stdout, target)
+            .or_else(|| parse_windows_netstat_pid_by_port(&stdout, target.port))
     }
 
     #[cfg(not(windows))]
@@ -314,6 +332,37 @@ fn find_pid_by_probe_target(target: &ProbeTarget) -> Option<u32> {
         let _ = target;
         None
     }
+}
+
+fn parse_windows_netstat_pid_by_port(output: &str, port: u16) -> Option<u32> {
+    output.lines().find_map(|line| {
+        let columns: Vec<&str> = line.split_whitespace().collect();
+        if columns.len() < 5 {
+            return None;
+        }
+        if !columns[0].eq_ignore_ascii_case("TCP") {
+            return None;
+        }
+        if !columns[3].eq_ignore_ascii_case("LISTENING") {
+            return None;
+        }
+        let (_, local_port) = split_socket_host_port(columns[1])?;
+        if local_port != port {
+            return None;
+        }
+        columns[4].parse::<u32>().ok()
+    })
+}
+
+fn wait_for_probe_target_to_stop(target: &ProbeTarget, timeout: Duration) -> bool {
+    let started = std::time::Instant::now();
+    while started.elapsed() < timeout {
+        if !is_probe_target_running(target) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    !is_probe_target_running(target)
 }
 
 fn parse_windows_netstat_pid(output: &str, target: &ProbeTarget) -> Option<u32> {
@@ -345,10 +394,14 @@ fn local_address_matches_probe_target(local_address: &str, target: &ProbeTarget)
 
     let target_host = target.host.trim().to_ascii_lowercase();
     let local_host = host.trim_matches(|ch| ch == '[' || ch == ']').to_ascii_lowercase();
+    let target_is_loopback = matches!(target_host.as_str(), "127.0.0.1" | "::1" | "localhost");
+    let local_is_loopback = matches!(local_host.as_str(), "127.0.0.1" | "::1");
+    let local_is_wildcard = matches!(local_host.as_str(), "0.0.0.0" | "::");
 
     local_host == target_host
-        || (target_host == "localhost" && (local_host == "127.0.0.1" || local_host == "::1"))
-        || ((target_host == "0.0.0.0" || target_host == "::") && (local_host == "0.0.0.0" || local_host == "::"))
+        || (target_host == "localhost" && local_is_loopback)
+        || (target_is_loopback && local_is_wildcard)
+        || ((target_host == "0.0.0.0" || target_host == "::") && local_is_wildcard)
 }
 
 fn split_socket_host_port(local_address: &str) -> Option<(&str, u16)> {
@@ -373,7 +426,7 @@ fn split_socket_host_port(local_address: &str) -> Option<(&str, u16)> {
 fn stop_process_by_pid(pid: u32) -> Result<(), String> {
     #[cfg(windows)]
     {
-        let output = Command::new("taskkill")
+        let output = Command::new(windows_system_executable("taskkill.exe"))
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdin(Stdio::null())
             .stderr(Stdio::piped())
@@ -401,6 +454,12 @@ fn stop_process_by_pid(pid: u32) -> Result<(), String> {
         let _ = pid;
         Err("Stopping external services by PID is not implemented on this platform".to_string())
     }
+}
+
+#[cfg(windows)]
+fn windows_system_executable(name: &str) -> PathBuf {
+    let system_root = env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+    PathBuf::from(system_root).join("System32").join(name)
 }
 
 fn resolve_repo_path(repo_root: &str, relative_or_absolute: &str) -> PathBuf {
@@ -630,13 +689,15 @@ pub fn build_turnstile_solver_probe_target(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::env;
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
 
     use super::{
         build_mail_gateway_spec_with_python, build_turnstile_solver_spec, conda_env_python_path,
-        find_conda_env_prefix_in_json, parse_windows_netstat_pid, CommandSpec, ManagedService,
-        ProbeTarget, ServiceManager, ServiceSource, ServiceStatus, MAIL_GATEWAY_SERVICE,
+        find_conda_env_prefix_in_json, parse_windows_netstat_pid, windows_system_executable,
+        CommandSpec, ManagedService, ProbeTarget, ServiceManager, ServiceSource, ServiceStatus,
+        MAIL_GATEWAY_SERVICE,
     };
 
     fn config(entries: &[(&str, &str)]) -> HashMap<String, String> {
@@ -788,6 +849,46 @@ mod tests {
             }),
             Some(45678)
         );
+    }
+
+    #[test]
+    fn parses_windows_netstat_pid_for_wildcard_listener_when_probe_uses_loopback() {
+        let output = "\
+  TCP    0.0.0.0:5000           0.0.0.0:0              LISTENING       12345\r\n\
+  TCP    [::]:8081              [::]:0                 LISTENING       45678\r\n";
+
+        assert_eq!(
+            parse_windows_netstat_pid(
+                output,
+                &ProbeTarget {
+                    host: "127.0.0.1".to_string(),
+                    port: 5000,
+                },
+            ),
+            Some(12345)
+        );
+        assert_eq!(
+            parse_windows_netstat_pid(
+                output,
+                &ProbeTarget {
+                    host: "localhost".to_string(),
+                    port: 8081,
+                },
+            ),
+            Some(45678)
+        );
+    }
+
+    #[test]
+    fn windows_system_executable_uses_system_root_when_available() {
+        let expected = PathBuf::from(r"C:\Windows\System32\netstat.exe");
+        unsafe {
+            env::set_var("SystemRoot", r"C:\Windows");
+        }
+
+        let resolved = windows_system_executable("netstat.exe");
+
+        assert_eq!(resolved, expected);
     }
 
     #[test]
