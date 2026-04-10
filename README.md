@@ -1,5 +1,9 @@
 # Orchids Register
 
+免责声明
+
+本项目仅供学习与技术研究使用，请勿用于任何违反服务条款、法律法规或他人权益的用途。
+
 基于 `Rust + Tauri + React + Python` 的 Orchids 注册工具。
 
 当前推荐使用方式已经切换为：
